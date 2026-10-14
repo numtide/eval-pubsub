@@ -4,18 +4,57 @@ package pubsub;
 
 service PubSub {
   rpc ListJobs(BuilderInformation) returns (stream Job) {}
+  rpc PickJob(Job) returns (PickJobResponse) {}
+  rpc ConcludeJob(ConcludeJobRequest) returns (ConcludeJobResponse) {}
 }
 
-message BuildJob {}
+message PickJobResponse {
+  message Allow {
+    uint64 job_id = 1;
+  }
 
-message FlakeEvalJob {
-  string flake_ref = 1;
-  repeated string attr = 2;
+  message Deny {
+
+  }
+
+  oneof pick_response {
+    Allow allow = 1;
+    Deny deny = 2;
+  }
+}
+
+message ConcludeJobRequest {
+  message Success {
+
+  }
+
+  message Failure {
+
+  }
+
+  uint64 job_id = 1;
+  oneof result {
+    Success success = 2;
+    Failure failure = 3;
+  }
+}
+
+message ConcludeJobResponse {
+
+}
+
+message BuildJob {
+  string derivation = 1;
 }
 
 message EvalJob {
-  oneof eval_job_type {
-    FlakeEvalJob eval_job = 1;
+  message Flake {
+    string flake_ref = 1;
+    repeated string attr = 2;
+  }
+
+  oneof type {
+    Flake flake = 1;
   }
 }
 
@@ -26,8 +65,8 @@ message BuilderInformation {
 }
 
 message Job {
-  oneof job_type {
-    EvalJob eval_job = 1;
-    BuildJob build_job = 2;
+  oneof type {
+    EvalJob eval = 1;
+    BuildJob build = 2;
   }
 }
