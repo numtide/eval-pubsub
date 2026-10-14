@@ -8,7 +8,16 @@ service PubSub {
 
 message BuildJob {}
 
-message EvalJob {}
+message FlakeEvalJob {
+  string flake_ref = 1;
+  repeated string attr = 2;
+}
+
+message EvalJob {
+  oneof eval_job_type {
+    FlakeEvalJob eval_job = 1;
+  }
+}
 
 message BuilderInformation {
   string system = 1;
