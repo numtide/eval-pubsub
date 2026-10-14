@@ -9,21 +9,21 @@ The design consists of 4 different participants:
 
    This can be a user, or a bigger CI/CD system, like Jenkins.
 
-2. *the publisher*
+2. *the submitter*
 
    This is the service that the client talks to, it should be running on the same system as the client.
 
 3. *builders*
 
-   They pick jobs from /the publisher/ and perform the actual work on their systems, generally /builders/ and /publishers/ wouldn't be collocated on the same system.
+   They pick jobs from /the submitter/ and perform the actual work on their systems, generally /builders/ and /submitters/ wouldn't be collocated on the same system.
 
 4. *the Nix daemon*
 
    Runs on the same system as the /builder/ it is attached to, generally there would be a 1-to-1 mapping between /builders/ and /nix Daemons/
 
-The jist of this setup is that a /publisher/ takes on jobs (for now evaluations) from a client and publishes over gRPC that it wants someone to do the job. /Builders/ stream new jobs from multiple /publishers/. When a new job appears, a /builder/ can pick a job, which the /publisher/ of that job, can either allow or deny (this can be on performance characteristics of the /builder/ or the distribution on evaluation inputs among builders).
+The jist of this setup is that a /submitter/ takes on jobs (for now evaluations) from a client and publishes over gRPC that it wants someone to do the job. /Builders/ stream new jobs from multiple /submitters/. When a new job appears, a /builder/ can pick a job, which the /submitter/ of that job, can either allow or deny (this can be on performance characteristics of the /builder/ or the distribution on evaluation inputs among builders).
 
-When a /builder/ is allowed to pick a job, it then does the work neccessary to fulfill the job. Once complete, it tells the /publisher/ that the job concluded.
+When a /builder/ is allowed to pick a job, it then does the work neccessary to fulfill the job. Once complete, it tells the /submitter/ that the job concluded.
 
 #+name: eval sequence
 #+begin_src plantuml :exports results :results file :file ./images/eval_sequence.png
@@ -32,44 +32,44 @@ When a /builder/ is allowed to pick a job, it then does the work neccessary to f
   skinparam responseMessageBelowArrow true
 
   participant Client      as Client
-  participant Publisher   as Publisher
+  participant Submitter   as Submitter
   participant "Builder 1" as Builder1
   participant "Builder 2" as Builder2
   participant "Builder 3" as Builder3
 
-  Builder1 -> Publisher : ListJobs
-  Builder2 -> Publisher : ListJobs
-  Builder3 -> Publisher : ListJobs
+  Builder1 -> Submitter : ListJobs
+  Builder2 -> Submitter : ListJobs
+  Builder3 -> Submitter : ListJobs
 
-  Client -> Publisher : eval flake
-  activate Publisher
+  Client -> Submitter : eval flake
+  activate Submitter
 
-  Publisher -> Builder1 : Job::Eval
+  Submitter -> Builder1 : Job::Eval
   activate Builder1
-  Builder1 -> Publisher : PickJob
-  Publisher --> Builder1 : DenyPick
+  Builder1 -> Submitter : PickJob
+  Submitter --> Builder1 : DenyPick
   deactivate Builder1
 
-  Publisher -> Builder2 : Job::Eval
+  Submitter -> Builder2 : Job::Eval
   note right: ignore
 
-  Publisher -> Builder3 : Job::Eval
+  Submitter -> Builder3 : Job::Eval
   activate Builder3
-  Builder3 -> Publisher : PickJob
-  Publisher --> Builder3 : AllowPick
+  Builder3 -> Submitter : PickJob
+  Submitter --> Builder3 : AllowPick
 
   Builder3 ->] : nix eval
 
-  Builder3 ->> Publisher : JobOutput
-  Builder3 ->> Publisher : JobOutput
-  Builder3 ->> Publisher : JobOutput
+  Builder3 ->> Submitter : JobOutput
+  Builder3 ->> Submitter : JobOutput
+  Builder3 ->> Submitter : JobOutput
 
   Builder3 <--] : nix eval done
-  Builder3 -> Publisher : ConcludeJob::Success
+  Builder3 -> Submitter : ConcludeJob::Success
   deactivate Builder3
 
-  Publisher -> Client : done
-  deactivate Publisher
+  Submitter -> Client : done
+  deactivate Submitter
 
   @enduml
 #+end_src
