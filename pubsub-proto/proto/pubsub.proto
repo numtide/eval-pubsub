@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package pubsub;
+
+service PubSub {
+  rpc ListJobs(BuilderInformation) returns (stream Job) {}
+}
+
+message BuildJob {}
+
+message EvalJob {}
+
+message BuilderInformation {
+  string system = 1;
+  int32 smt_core_count = 2;
+  uint64 total_memory = 3;
+}
+
+message Job {
+  oneof job_type {
+    EvalJob eval_job = 1;
+    BuildJob build_job = 2;
+  }
+}

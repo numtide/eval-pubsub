@@ -37,6 +37,8 @@
               cargo
               rustc
               treefmtEval.config.build.wrapper
+              protobuf
+              rust-analyzer
             ];
           };
         };
