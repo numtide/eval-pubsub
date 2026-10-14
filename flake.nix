@@ -39,6 +39,7 @@
               treefmtEval.config.build.wrapper
               protobuf
               rust-analyzer
+              plantuml
             ];
           };
         };

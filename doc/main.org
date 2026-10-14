@@ -1,0 +1,55 @@
+# -*- org-plantuml-exec-mode: plantuml -*-
+
+#+STARTUP: inlineimages
+
+#+name: eval sequence
+#+begin_src plantuml :exports results :results file :file ./images/eval_sequence.png
+  @startuml
+
+  skinparam responseMessageBelowArrow true
+
+  participant Client      as Client
+  participant Publisher   as Publisher
+  participant "Builder 1" as Builder1
+  participant "Builder 2" as Builder2
+  participant "Builder 3" as Builder3
+
+  Builder1 -> Publisher : ListJobs
+  Builder2 -> Publisher : ListJobs
+  Builder3 -> Publisher : ListJobs
+
+  Client -> Publisher : eval flake
+  activate Publisher
+
+  Publisher -> Builder1 : Job::Eval
+  activate Builder1
+  Builder1 -> Publisher : PickJob
+  Publisher --> Builder1 : DenyPick
+  deactivate Builder1
+
+  Publisher -> Builder2 : Job::Eval
+  note right: ignore
+
+  Publisher -> Builder3 : Job::Eval
+  activate Builder3
+  Builder3 -> Publisher : PickJob
+  Publisher --> Builder3 : AllowPick
+
+  Builder3 ->] : nix eval
+
+  Builder3 ->> Publisher : JobOutput
+  Builder3 ->> Publisher : JobOutput
+  Builder3 ->> Publisher : JobOutput
+
+  Builder3 <--] : nix eval done
+  Builder3 -> Publisher : ConcludeJob::Success
+  deactivate Builder3
+
+  Publisher -> Client : done
+  deactivate Publisher
+
+  @enduml
+#+end_src
+
+#+RESULTS: eval sequence
+[[file:./images/eval_sequence.png]]

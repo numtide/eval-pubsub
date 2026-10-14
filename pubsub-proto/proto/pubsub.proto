@@ -4,13 +4,27 @@ package pubsub;
 
 service PubSub {
   rpc ListJobs(BuilderInformation) returns (stream Job) {}
-  rpc PickJob(Job) returns (PickJobResponse) {}
+  rpc PickJob(PickJobRequest) returns (PickJobResponse) {}
   rpc ConcludeJob(ConcludeJobRequest) returns (ConcludeJobResponse) {}
+  rpc JobOutput(JobOutputRequest) returns (JobOutputResponse) {}
+}
+
+message JobOutputRequest {
+  uint64 job_id = 1;
+  repeated string output = 2;
+}
+
+message JobOutputResponse {
+
+}
+
+message PickJobRequest {
+  uint64 job_id = 1;
 }
 
 message PickJobResponse {
   message Allow {
-    uint64 job_id = 1;
+
   }
 
   message Deny {
@@ -65,8 +79,9 @@ message BuilderInformation {
 }
 
 message Job {
+  uint64 job_id = 1;
   oneof type {
-    EvalJob eval = 1;
-    BuildJob build = 2;
+    EvalJob eval = 2;
+    BuildJob build = 3;
   }
 }
