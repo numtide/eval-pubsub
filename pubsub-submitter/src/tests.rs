@@ -91,7 +91,7 @@ async fn add_merchant_test() {
         {
             let eval_job = eval_job.clone();
             async |server| {
-                server.submit_eval_job(eval_job).await.unwrap();
+                server.submit_eval_job(eval_job).await;
             }
         },
         async |mut client: PubSubClient<Channel>| {

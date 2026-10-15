@@ -1,5 +1,9 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
+use std::sync::Arc;
+
+use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 
 pub trait Keyable {
     type Key;
@@ -7,73 +11,95 @@ pub trait Keyable {
     fn key(&self) -> Self::Key;
 }
 
-pub struct Queue<T, K> {
-    deque: VecDeque<Option<T>>,
-    map: HashMap<K, usize>,
-    max: usize,
-    generation: usize,
+#[derive(Debug)]
+pub struct Sender<T, K> {
+    sender: mpsc::Sender<T>,
+    live_set: Arc<RwLock<HashSet<K>>>,
 }
 
-impl<T> Queue<T, T::Key>
+#[derive(Debug)]
+pub struct Receiver<T, K> {
+    receiver: mpsc::Receiver<T>,
+    live_set: Arc<RwLock<HashSet<K>>>,
+}
+
+
+pub fn new<T, K>(max: usize) -> (Sender<T, K>, Receiver<T, K>) {
+    let (sender, receiver) = mpsc::channel(max);
+    let live_set = Arc::new(RwLock::new(HashSet::new()));
+
+    (Sender {
+        sender,
+        live_set: live_set.clone(),
+    }, Receiver {
+        receiver,
+        live_set,
+    })
+}
+
+impl<T> Sender<T, T::Key>
 where
     T: Keyable,
     T::Key: Eq,
     T::Key: Hash,
 {
-    pub fn new(max: usize) -> Self {
-        Self {
-            deque: VecDeque::new(),
-            map: HashMap::new(),
-            max,
-            generation: 0,
+    pub async fn push(&mut self, item: T) -> Option<T> {
+        let key = item.key();
+        match self.sender.try_send(item) {
+            Ok(_) => {
+                self.live_set.write().await.insert(key);
+                None
+            }
+            Err(TrySendError::Full(item)) => Some(item),
+            Err(TrySendError::Closed(item)) => Some(item),
         }
     }
 
-    pub fn push(&mut self, item: T) -> Option<T> {
-        if self.deque.len() < self.max {
-            self.map.insert(item.key(), self.generation);
-            self.deque.push_front(Some(item));
-            self.generation += 1;
-            None
-        } else {
-            Some(item)
-        }
+    pub async fn remove(&mut self, item: T) -> bool {
+        let key = item.key();
+        self.live_set.write().await.remove(&key)
     }
+}
 
-    pub fn pop(&mut self) -> Option<T> {
+
+impl<T> Receiver<T, T::Key>
+where
+    T: Keyable,
+    T::Key: Eq,
+    T::Key: Hash,
+{
+    pub async fn try_pop(&mut self) -> Option<T> {
         loop {
             // we skip over any removed elements, this makes this function O(n) in the worst case
-            match self.deque.pop_back() {
-                // there was an element, but it's been removed
-                Some(None) => {}
-                // there is an element, return it
-                Some(Some(item)) => break Some(item),
-                // we reached the end of the deque
-                None => break None,
+            match self.receiver.try_recv() {
+                Ok(item) => if self.live_set.write().await.remove(&item.key()) {
+                    break Some(item)
+                },
+                Err(TryRecvError::Empty) => break None,
+                Err(TryRecvError::Disconnected) => break None,
             }
         }
     }
 
-    pub fn remove(&mut self, item: T) -> Option<T> {
-        let key = item.key();
-
-        match self.map.get(&key) {
-            Some(generation) => {
-                let index = self.generation - generation;
-                self.deque.push_front(None);
-                self.deque.swap(index, 0);
-                self.map.remove(&key);
-                self.deque
-                    .pop_front()
-                    .expect("we just pushed on an item, where did it go?")
+    pub async fn pop(&mut self) -> Option<T> {
+        loop {
+            // we skip over any removed elements, this makes this function O(n) in the worst case
+            match self.receiver.recv().await {
+                Some(item) => if self.live_set.write().await.remove(&item.key()) {
+                    break Some(item)
+                },
+                None => break None
             }
-            None => None,
         }
+    }
+
+    pub fn is_empty(&mut self) -> bool {
+        self.receiver.is_empty()
     }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[derive(Debug, Eq, PartialEq, Hash)]
@@ -86,37 +112,37 @@ mod test {
         }
     }
 
-    #[test]
-    fn empty() {
-        let mut q: Queue<Item, i32> = Queue::new(128);
+    #[tokio::test]
+    async fn empty() {
+        let (_sender, mut receiver): (Sender<Item, _>, Receiver<Item, _>) = new(128);
 
-        assert_eq!(q.pop(), None);
+        assert_eq!(receiver.try_pop().await, None);
     }
 
-    #[test]
-    fn push_2_pop_2() {
-        let mut q = Queue::new(128);
+    #[tokio::test]
+    async fn push_2_pop_2() {
+        let (mut sender, mut receiver) = new(128);
 
-        q.push(Item(0));
-        q.push(Item(1));
+        sender.push(Item(0)).await;
+        sender.push(Item(1)).await;
 
-        assert_eq!(q.pop(), Some(Item(0)));
-        assert_eq!(q.pop(), Some(Item(1)));
-        assert_eq!(q.pop(), None);
+        assert_eq!(receiver.try_pop().await, Some(Item(0)));
+        assert_eq!(receiver.try_pop().await, Some(Item(1)));
+        assert_eq!(receiver.try_pop().await, None);
     }
 
-    #[test]
-    fn push_3_remove_2nd_pop_2() {
-        let mut q = Queue::new(128);
+    #[tokio::test]
+    async fn push_3_remove_2nd_pop_2() {
+        let (mut sender, mut receiver) = new(128);
 
-        q.push(Item(0));
-        q.push(Item(1));
-        q.push(Item(2));
+        sender.push(Item(0)).await;
+        sender.push(Item(1)).await;
+        sender.push(Item(2)).await;
 
-        q.remove(Item(1));
+        sender.remove(Item(1)).await;
 
-        assert_eq!(q.pop(), Some(Item(0)));
-        assert_eq!(q.pop(), Some(Item(2)));
-        assert_eq!(q.pop(), None);
+        assert_eq!(receiver.try_pop().await, Some(Item(0)));
+        assert_eq!(receiver.try_pop().await, Some(Item(2)));
+        assert_eq!(receiver.try_pop().await, None);
     }
 }

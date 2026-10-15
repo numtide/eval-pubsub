@@ -2,12 +2,15 @@ use pubsub_proto as proto;
 use pubsub_proto::pub_sub_server::{PubSub, PubSubServer};
 
 use anyhow::Result;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+
+use crate::queue::{Keyable, self as queue};
 
 #[derive(Debug, Clone)]
 pub enum EvalJobType {
@@ -21,6 +24,14 @@ pub enum EvalJobType {
 pub struct EvalJob {
     pub job_id: Uuid,
     pub r#type: EvalJobType,
+}
+
+impl Keyable for EvalJob {
+    type Key = Uuid;
+
+    fn key(&self) -> Self::Key {
+        self.job_id
+    }
 }
 
 impl From<EvalJob> for proto::Job {
@@ -41,12 +52,17 @@ impl From<EvalJob> for proto::Job {
     }
 }
 
-#[derive(Debug)]
+struct BuilderState {
+    sender: queue::Sender<EvalJob, Uuid>,
+    builder_information: proto::BuilderInformation,
+    task: JoinHandle<Box<dyn Future<Output = ()> + Send>>,
+}
+
 pub struct PubSubService {
     pending_eval_jobs: Arc<RwLock<HashMap<Uuid, EvalJob>>>,
     picked_eval_jobs: Arc<RwLock<HashMap<Uuid, EvalJob>>>,
-    eval_jobs_chan: (broadcast::Sender<EvalJob>, broadcast::Receiver<EvalJob>),
-    builders: Arc<RwLock<HashMap<Uuid, proto::BuilderInformation>>>,
+
+    builder_states: Arc<RwLock<HashMap<Uuid, BuilderState>>>,
 }
 
 #[tonic::async_trait]
@@ -58,41 +74,34 @@ impl PubSub for PubSubService {
     ) -> Result<Response<Self::ListJobsStream>, Status> {
         match request.get_ref() {
             proto::ListJobsRequest { builder_information: Some(builder_information) } => {
-                self.builders.write().await.insert(builder_information.uuid.unwrap().into(), builder_information.clone());
-
-                let (tx, rx) = mpsc::channel(4);
-                let mut eval_jobs = self.eval_jobs_chan.0.subscribe();
-
-                // TODO this thing here is most definitely racy
-                {
-                    let tx = tx.clone();
-                    let pending_eval_jobs = self.pending_eval_jobs.read().await.clone();
-                    tokio::spawn(async move {
-                        for eval_job in pending_eval_jobs.values() {
-                            println!("returning pending job {:?}", eval_job);
-                            let _ = tx.send(Ok(proto::ListJobsResponse {
+                // TODO configurable?
+                let (sender, mut receiver) = queue::new(256);
+                let (tx, rx) = mpsc::channel(1);
+                let pending_eval_jobs = self.pending_eval_jobs.clone();
+                // TODO still racy
+                self.builder_states.write().await.insert(builder_information.uuid.unwrap().into(), BuilderState {
+                    sender,
+                    builder_information: builder_information.clone(),
+                    task: tokio::spawn(Box::pin(async move {
+                        println!("background filter started");
+                        for eval_job in pending_eval_jobs.read().await.values() {
+                            tx.send(Ok(proto::ListJobsResponse {
                                 job: Some(eval_job.clone().into())
-                            })).await;
+                            })).await.unwrap();
                         }
-                    });
-                };
-                {
-                    let builder_uuid = builder_information.uuid.unwrap().into();
-                    let builders = self.builders.clone();
-                    tokio::spawn(async move {
-                        while let Ok(eval_job) = eval_jobs.recv().await {
-                            match tx.send(Ok(proto::ListJobsResponse {
-                                job: Some(eval_job.into())
-                            })).await {
-                                Ok(_) => { /* all good */ },
-                                Err(_) => {
-                                    // closed
-                                    builders.write().await.remove(&builder_uuid);
+
+                        loop {
+                            match receiver.pop().await {
+                                Some(eval_job) => {
+                                    tx.send(Ok(proto::ListJobsResponse {
+                                        job: Some(eval_job.clone().into())
+                                    })).await.unwrap();
                                 },
-                            };
+                                None => todo!(),
+                            }
                         }
-                    });
-                }
+                    })),
+                });
 
                 Ok(Response::new(ReceiverStream::new(rx)))
             },
@@ -140,23 +149,18 @@ impl PubSub for PubSubService {
 
 impl PubSubService {
     pub fn new() -> PubSubService {
-        let chan = broadcast::channel(128);
-
-        let route_guide = PubSubService {
-            eval_jobs_chan: chan,
-            builders: Arc::new(RwLock::new(HashMap::new())),
+        let pub_sub_service = PubSubService {
             pending_eval_jobs: Arc::new(RwLock::new(HashMap::new())),
             picked_eval_jobs: Arc::new(RwLock::new(HashMap::new())),
+
+            builder_states: Arc::new(RwLock::new(HashMap::new())),
         };
 
-        route_guide
+        pub_sub_service
     }
 
-    pub async fn submit_eval_job(&mut self, eval_job: EvalJob) -> Result<usize> {
+    pub async fn submit_eval_job(&mut self, eval_job: EvalJob) {
         println!("new job");
-
-        let size = self.eval_jobs_chan.0.send(eval_job.clone())?;
         self.pending_eval_jobs.write().await.insert(eval_job.job_id, eval_job);
-        Ok(size)
     }
 }
