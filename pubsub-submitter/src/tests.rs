@@ -108,9 +108,19 @@ async fn add_merchant_test() {
             .unwrap();
 
             let mut inbound_stream = response.into_inner();
-            if let Some(proto::ListJobsResponse { job: Some(job) }) = inbound_stream.message().await.unwrap() {
-                assert_eq!(job, eval_job.into());
-                println!("{:?}", job);
+            let proto::ListJobsResponse { job } = inbound_stream.message().await.unwrap().expect("didn't return a ListJobsResponse");
+            let job = job.expect("didn't return a job");
+            assert_eq!(job, eval_job.into());
+            println!("{:?}", job);
+
+            match client.pick_job(Request::new(proto::PickJobRequest { job_id: job.job_id })).await.unwrap().get_ref() {
+                proto::PickJobResponse { pick_response: Some(proto::pick_job_response::PickResponse::Allow(_)) } => {
+                    println!("successfully picked a job")
+                },
+                proto::PickJobResponse { pick_response: Some(proto::pick_job_response::PickResponse::Deny(_)) } => {
+                    panic!("server denied the pick when an allow was expected")
+                },
+                proto::PickJobResponse { pick_response: None } => panic!("server didn't return a pick response"),
             };
         }
     );

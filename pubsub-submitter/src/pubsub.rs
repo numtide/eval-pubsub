@@ -102,9 +102,25 @@ impl PubSub for PubSubService {
 
     async fn pick_job(
         &self,
-        _request: Request<proto::PickJobRequest>,
+        request: Request<proto::PickJobRequest>,
     ) -> Result<Response<proto::PickJobResponse>, Status> {
-        unimplemented!();
+        match request.get_ref() {
+            proto::PickJobRequest { job_id: Some(job_id) }  => {
+                let job_id = (*job_id).into();
+                println!("pending jobs: {:?}", self.pending_eval_jobs.read().await);
+                match self.pending_eval_jobs.write().await.remove(&job_id) {
+                    Some(eval_job) => {
+                        self.picked_eval_jobs.write().await.insert(job_id, eval_job).ok_or(()).expect_err("cannot pick a already picked job, this shouldn't happen");
+
+                        Ok(Response::new(proto::PickJobResponse{
+                            pick_response: Some(proto::pick_job_response::PickResponse::Allow (proto::pick_job_response::Allow {}))
+                        }))
+                    },
+                    None => Err(Status::not_found(format!("job with id {:?} not known or isn't pending", job_id)))
+                }
+            },
+            _ => panic!("pick job request didn't come with an ID")
+        }
     }
 
     async fn conclude_job(
@@ -139,10 +155,8 @@ impl PubSubService {
     pub async fn submit_eval_job(&mut self, eval_job: EvalJob) -> Result<usize> {
         println!("new job");
 
-        let uuid = Uuid::new_v4();
-
         let size = self.eval_jobs_chan.0.send(eval_job.clone())?;
-        self.pending_eval_jobs.write().await.insert(uuid, eval_job);
+        self.pending_eval_jobs.write().await.insert(eval_job.job_id, eval_job);
         Ok(size)
     }
 }
