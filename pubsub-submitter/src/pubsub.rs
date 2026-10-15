@@ -1,15 +1,15 @@
-use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
 use pubsub_proto::pubsub as proto;
+use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
 
-use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use crate::error::{ProtocolError, SubmitterError};
 use crate::queue::{self as queue, Keyable};
 
 #[derive(Debug, Clone)]
@@ -40,12 +40,12 @@ impl From<EvalJob> for proto::server::Job {
             job_id: Some(value.job_id.into()),
             r#type: Some(proto::server::job::Type::Eval(proto::common::EvalJob {
                 r#type: match value.r#type {
-                    EvalJobType::Flake { flake_ref, attrs } => {
-                        Some(proto::common::eval_job::Type::Flake(proto::common::eval_job::Flake {
+                    EvalJobType::Flake { flake_ref, attrs } => Some(
+                        proto::common::eval_job::Type::Flake(proto::common::eval_job::Flake {
                             flake_ref,
                             attr: attrs,
-                        }))
-                    }
+                        }),
+                    ),
                 },
             })),
         }
@@ -73,84 +73,85 @@ impl PubSub for PubSubService {
         &self,
         request: Request<proto::server::ListJobsRequest>,
     ) -> Result<Response<Self::ListJobsStream>, Status> {
-        match request.get_ref() {
-            proto::server::ListJobsRequest {
-                builder_information: Some(builder_information),
-            } => {
-                // TODO configurable?
-                let (sender, mut receiver) = queue::new(256);
-                let (tx, rx) = mpsc::channel(1);
-                let pending_eval_jobs = self.pending_eval_jobs.clone();
-                // TODO still racy
-                self.builder_states.write().await.insert(
-                    builder_information.uuid.unwrap().into(),
-                    BuilderState {
-                        sender,
-                        builder_information: builder_information.clone(),
-                        task: tokio::spawn(Box::pin(async move {
-                            println!("background filter started");
-                            for eval_job in pending_eval_jobs.read().await.values() {
+        let builder_information = request
+            .get_ref()
+            .builder_information
+            .as_ref()
+            .ok_or(ProtocolError::field_missing(&["builder_information"]))?;
+
+        // TODO configurable?
+        let (sender, mut receiver) = queue::new(256);
+        let (tx, rx) = mpsc::channel(1);
+        let pending_eval_jobs = self.pending_eval_jobs.clone();
+        let builder_uuid = builder_information
+            .uuid
+            .ok_or(ProtocolError::field_missing(&[
+                "builder_information",
+                "uuid",
+            ]))?
+            .into();
+        // TODO still racy
+        self.builder_states.write().await.insert(
+            builder_uuid,
+            BuilderState {
+                sender,
+                builder_information: builder_information.clone(),
+                task: tokio::spawn(Box::pin(async move {
+                    println!("background filter started");
+                    for eval_job in pending_eval_jobs.read().await.values() {
+                        tx.send(Ok(proto::server::ListJobsResponse {
+                            job: Some(eval_job.clone().into()),
+                        }))
+                        .await
+                        .map_err(|_| SubmitterError::JobSend { builder_uuid })
+                        .unwrap();
+                    }
+
+                    loop {
+                        match receiver.pop().await {
+                            Some(eval_job) => {
                                 tx.send(Ok(proto::server::ListJobsResponse {
                                     job: Some(eval_job.clone().into()),
                                 }))
                                 .await
+                                .map_err(|_| SubmitterError::JobSend { builder_uuid })
                                 .unwrap();
                             }
+                            None => todo!(),
+                        }
+                    }
+                })),
+            },
+        );
 
-                            loop {
-                                match receiver.pop().await {
-                                    Some(eval_job) => {
-                                        tx.send(Ok(proto::server::ListJobsResponse {
-                                            job: Some(eval_job.clone().into()),
-                                        }))
-                                        .await
-                                        .unwrap();
-                                    }
-                                    None => todo!(),
-                                }
-                            }
-                        })),
-                    },
-                );
-
-                Ok(Response::new(ReceiverStream::new(rx)))
-            }
-            _ => panic!("builder didn't provide BuilderInformation"),
-        }
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn pick_job(
         &self,
         request: Request<proto::server::PickJobRequest>,
     ) -> Result<Response<proto::server::PickJobResponse>, Status> {
-        match request.get_ref() {
-            proto::server::PickJobRequest {
-                job_id: Some(job_id),
-            } => {
-                let job_id = (*job_id).into();
-                println!("pending jobs: {:?}", self.pending_eval_jobs.read().await);
-                match self.pending_eval_jobs.write().await.remove(&job_id) {
-                    Some(eval_job) => {
-                        self.picked_eval_jobs
-                            .write()
-                            .await
-                            .insert(job_id, eval_job)
-                            .ok_or(())
-                            .expect_err("cannot pick a already picked job, this shouldn't happen");
+        let job_id = request
+            .get_ref()
+            .job_id
+            .as_ref()
+            .ok_or(ProtocolError::field_missing(&["job_id"]))?
+            .into();
+        println!("pending jobs: {:?}", self.pending_eval_jobs.read().await);
+        match self.pending_eval_jobs.write().await.remove(&job_id) {
+            Some(eval_job) => {
+                match self.picked_eval_jobs.write().await.insert(job_id, eval_job) {
+                    Some(_) => Err(SubmitterError::JobPickedTwice { job_uuid: job_id }),
+                    None => Ok(()),
+                }?;
 
-                        Ok(Response::new(proto::server::PickJobResponse {
-                            pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(
-                                proto::server::pick_job_response::Allow {},
-                            )),
-                        }))
-                    }
-                    None => Err(Status::not_found(format!(
-                        "job with id {:?} not known or isn't pending",
-                        job_id
-                    ))),
-                }
+                Ok(Response::new(proto::server::PickJobResponse {
+                    pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(
+                        proto::server::pick_job_response::Allow {},
+                    )),
+                }))
             }
-            _ => panic!("pick job request didn't come with an ID"),
+            None => Err(SubmitterError::JobNotFound { job_uuid: job_id }.into()),
         }
     }
 
@@ -181,20 +182,23 @@ impl PubSubService {
         pub_sub_service
     }
 
-    pub async fn submit_eval_job(&self, eval_job: EvalJob) {
+    pub async fn submit_eval_job(&self, eval_job: EvalJob) -> Result<(), SubmitterError> {
         println!("new job");
         self.pending_eval_jobs
             .write()
             .await
             .insert(eval_job.job_id, eval_job.clone());
 
-        for builder_state in self.builder_states.write().await.values_mut() {
-            builder_state
+        for (builder_uuid, builder_state) in self.builder_states.write().await.iter_mut() {
+            match builder_state
                 .sender
                 .push(eval_job.clone())
-                .await
-                .ok_or(())
-                .expect_err("failed to send eval job to a builder")
+                .await {
+                    Some(_) => Err(SubmitterError::JobSend { builder_uuid: *builder_uuid }),
+                    None => Ok(()),
+                }?
         }
+
+        Ok(())
     }
 }

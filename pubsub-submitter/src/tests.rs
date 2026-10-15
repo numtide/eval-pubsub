@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use hyper_util::rt::TokioIo;
-use pubsub_proto::pubsub::{self as proto, server::pub_sub_client::PubSubClient, server::pub_sub_server::PubSubServer};
+use pubsub_proto::pubsub::{
+    self as proto, server::pub_sub_client::PubSubClient, server::pub_sub_server::PubSubServer,
+};
 use tempfile::NamedTempFile;
 use tokio::{
     net::{UnixListener, UnixStream},
@@ -110,10 +112,10 @@ async fn end_to_end() {
             let notify_listing = notify_listing.clone();
 
             async move |server| {
-                server.submit_eval_job(eval_job_1).await;
+                server.submit_eval_job(eval_job_1).await.unwrap();
                 notify_submitted.notify_one();
                 notify_listing.notified().await;
-                server.submit_eval_job(eval_job_2).await;
+                server.submit_eval_job(eval_job_2).await.unwrap();
             }
         },
         async |mut client: PubSubClient<Channel>| {

@@ -22,10 +22,22 @@ impl From<uuid::Uuid> for common::Uuid {
     }
 }
 
+impl From<&uuid::Uuid> for common::Uuid {
+    fn from(value: &uuid::Uuid) -> Self {
+        (*value).into()
+    }
+}
+
 impl From<common::Uuid> for uuid::Uuid {
     fn from(value: common::Uuid) -> Self {
         match value {
             common::Uuid { hi, lo } => Self::from_u64_pair(hi, lo),
         }
+    }
+}
+
+impl From<&common::Uuid> for uuid::Uuid {
+    fn from(value: &common::Uuid) -> Self {
+        (*value).into()
     }
 }
