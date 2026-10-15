@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
 
-use tokio::sync::{RwLock, mpsc};
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
+use tokio::sync::{RwLock, mpsc};
 
 pub trait Keyable {
     type Key;
@@ -23,18 +23,17 @@ pub struct Receiver<T, K> {
     live_set: Arc<RwLock<HashSet<K>>>,
 }
 
-
 pub fn new<T, K>(max: usize) -> (Sender<T, K>, Receiver<T, K>) {
     let (sender, receiver) = mpsc::channel(max);
     let live_set = Arc::new(RwLock::new(HashSet::new()));
 
-    (Sender {
-        sender,
-        live_set: live_set.clone(),
-    }, Receiver {
-        receiver,
-        live_set,
-    })
+    (
+        Sender {
+            sender,
+            live_set: live_set.clone(),
+        },
+        Receiver { receiver, live_set },
+    )
 }
 
 impl<T> Sender<T, T::Key>
@@ -61,7 +60,6 @@ where
     }
 }
 
-
 impl<T> Receiver<T, T::Key>
 where
     T: Keyable,
@@ -72,9 +70,11 @@ where
         loop {
             // we skip over any removed elements, this makes this function O(n) in the worst case
             match self.receiver.try_recv() {
-                Ok(item) => if self.live_set.write().await.remove(&item.key()) {
-                    break Some(item)
-                },
+                Ok(item) => {
+                    if self.live_set.write().await.remove(&item.key()) {
+                        break Some(item);
+                    }
+                }
                 Err(TryRecvError::Empty) => break None,
                 Err(TryRecvError::Disconnected) => break None,
             }
@@ -85,10 +85,12 @@ where
         loop {
             // we skip over any removed elements, this makes this function O(n) in the worst case
             match self.receiver.recv().await {
-                Some(item) => if self.live_set.write().await.remove(&item.key()) {
-                    break Some(item)
-                },
-                None => break None
+                Some(item) => {
+                    if self.live_set.write().await.remove(&item.key()) {
+                        break Some(item);
+                    }
+                }
+                None => break None,
             }
         }
     }

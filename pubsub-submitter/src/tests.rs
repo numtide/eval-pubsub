@@ -17,12 +17,14 @@ use uuid::Uuid;
 
 use crate::pubsub;
 
-async fn server_and_client_stub<'a, Callback>(
+async fn server_and_client_stub<Callback, F>(
     other: Callback,
     shutdown: Arc<Notify>,
 ) -> (impl Future<Output = ()>, PubSubClient<Channel>)
 where
-    Callback: AsyncFnOnce(&mut pubsub::PubSubService) -> (),
+    Callback: FnOnce(pubsub::PubSubService) -> F,
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
 {
     let socket = NamedTempFile::new().unwrap();
     let socket = Arc::new(socket.into_temp_path());
@@ -31,8 +33,8 @@ where
     let uds = UnixListener::bind(&*socket).unwrap();
     let stream = UnixListenerStream::new(uds);
 
-    let mut pubsub_service = pubsub::PubSubService::new();
-    other(&mut pubsub_service).await;
+    let pubsub_service = pubsub::PubSubService::new();
+    tokio::spawn(other(pubsub_service.clone()));
     let serve_future = async move {
         let result = Server::builder()
             .add_service(PubSubServer::new(pubsub_service))
@@ -76,10 +78,15 @@ macro_rules! pubsub_submitter_test {
     };
 }
 
-// The actual test is here
+// We do this somewhat complicated dance with Notify, to ensure that we test both the case
+// where a job is already pending when a builder is first seen and when a builder has already
+// been seen (and is listing jobs).
 #[tokio::test]
-async fn add_merchant_test() {
-    let eval_job = pubsub::EvalJob {
+async fn end_to_end() {
+    let notify_submitted = Arc::new(Notify::new());
+    let notify_listing = Arc::new(Notify::new());
+
+    let eval_job_1 = pubsub::EvalJob {
         job_id: Uuid::new_v4(),
         r#type: pubsub::EvalJobType::Flake {
             flake_ref: "github:numtide/flake-utils".into(),
@@ -87,40 +94,84 @@ async fn add_merchant_test() {
         },
     };
 
+    let eval_job_2 = pubsub::EvalJob {
+        job_id: Uuid::new_v4(),
+        r#type: pubsub::EvalJobType::Flake {
+            flake_ref: "github:numtide/treefmt-nix".into(),
+            attrs: ["evalJobs"].map(Into::into).into(),
+        },
+    };
+
     pubsub_submitter_test!(
         {
-            let eval_job = eval_job.clone();
-            async |server| {
-                server.submit_eval_job(eval_job).await;
+            let eval_job_1 = eval_job_1.clone();
+            let eval_job_2 = eval_job_2.clone();
+            let notify_submitted = notify_submitted.clone();
+            let notify_listing = notify_listing.clone();
+
+            async move |server| {
+                server.submit_eval_job(eval_job_1).await;
+                notify_submitted.notify_one();
+                notify_listing.notified().await;
+                server.submit_eval_job(eval_job_2).await;
             }
         },
         async |mut client: PubSubClient<Channel>| {
+            notify_submitted.notified().await;
+
             let response = client
-            .list_jobs(Request::new(proto::ListJobsRequest {
-                builder_information: Some(proto::BuilderInformation {
-                    uuid: Some(Uuid::new_v4().into()),
-                    system: String::from("x86_64-linux"),
-                    smt_core_count: 32,
-                    total_memory: 32 * 1024 * 1024 * 1024,
-                })
-            }))
-            .await
-            .unwrap();
+                .list_jobs(Request::new(proto::ListJobsRequest {
+                    builder_information: Some(proto::BuilderInformation {
+                        uuid: Some(Uuid::new_v4().into()),
+                        system: String::from("x86_64-linux"),
+                        smt_core_count: 32,
+                        total_memory: 32 * 1024 * 1024 * 1024,
+                    }),
+                }))
+                .await
+                .unwrap();
+
+            notify_listing.notify_one();
 
             let mut inbound_stream = response.into_inner();
-            let proto::ListJobsResponse { job } = inbound_stream.message().await.unwrap().expect("didn't return a ListJobsResponse");
-            let job = job.expect("didn't return a job");
-            assert_eq!(job, eval_job.into());
-            println!("{:?}", job);
 
-            match client.pick_job(Request::new(proto::PickJobRequest { job_id: job.job_id })).await.unwrap().get_ref() {
-                proto::PickJobResponse { pick_response: Some(proto::pick_job_response::PickResponse::Allow(_)) } => {
+            let proto::ListJobsResponse { job } = inbound_stream
+                .message()
+                .await
+                .unwrap()
+                .expect("didn't return a ListJobsResponse");
+            let job_1 = job.expect("didn't return a job 1");
+            assert_eq!(job_1, eval_job_1.into());
+
+            let proto::ListJobsResponse { job } = inbound_stream
+                .message()
+                .await
+                .unwrap()
+                .expect("didn't return a ListJobsResponse");
+            let job_2 = job.expect("didn't return a job 2");
+            assert_eq!(job_2, eval_job_2.into());
+
+            match client
+                .pick_job(Request::new(proto::PickJobRequest {
+                    job_id: job_1.job_id,
+                }))
+                .await
+                .unwrap()
+                .get_ref()
+            {
+                proto::PickJobResponse {
+                    pick_response: Some(proto::pick_job_response::PickResponse::Allow(_)),
+                } => {
                     println!("successfully picked a job")
-                },
-                proto::PickJobResponse { pick_response: Some(proto::pick_job_response::PickResponse::Deny(_)) } => {
+                }
+                proto::PickJobResponse {
+                    pick_response: Some(proto::pick_job_response::PickResponse::Deny(_)),
+                } => {
                     panic!("server denied the pick when an allow was expected")
-                },
-                proto::PickJobResponse { pick_response: None } => panic!("server didn't return a pick response"),
+                }
+                proto::PickJobResponse {
+                    pick_response: None,
+                } => panic!("server didn't return a pick response"),
             };
         }
     );
