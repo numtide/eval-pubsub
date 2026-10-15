@@ -161,6 +161,10 @@ impl PubSubService {
 
     pub async fn submit_eval_job(&mut self, eval_job: EvalJob) {
         println!("new job");
-        self.pending_eval_jobs.write().await.insert(eval_job.job_id, eval_job);
+        self.pending_eval_jobs.write().await.insert(eval_job.job_id, eval_job.clone());
+
+        for builder_state in self.builder_states.write().await.values_mut() {
+            builder_state.sender.push(eval_job.clone()).await.ok_or(()).expect_err("failed to send eval job to a builder")
+        }
     }
 }
