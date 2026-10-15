@@ -43,9 +43,10 @@ impl From<EvalJob> for proto::Job {
 
 #[derive(Debug)]
 pub struct PubSubService {
-    pending_eval_jobs: HashMap<Uuid, EvalJob>,
+    pending_eval_jobs: Arc<RwLock<HashMap<Uuid, EvalJob>>>,
+    picked_eval_jobs: Arc<RwLock<HashMap<Uuid, EvalJob>>>,
     eval_jobs_chan: (broadcast::Sender<EvalJob>, broadcast::Receiver<EvalJob>),
-    builders: Arc<RwLock<Vec<proto::BuilderInformation>>>,
+    builders: Arc<RwLock<HashMap<Uuid, proto::BuilderInformation>>>,
 }
 
 #[tonic::async_trait]
@@ -53,33 +54,50 @@ impl PubSub for PubSubService {
     type ListJobsStream = ReceiverStream<Result<proto::ListJobsResponse, Status>>;
     async fn list_jobs(
         &self,
-        _request: Request<proto::ListJobsRequest>,
+        request: Request<proto::ListJobsRequest>,
     ) -> Result<Response<Self::ListJobsStream>, Status> {
-        let (tx, rx) = mpsc::channel(4);
-        let mut eval_jobs = self.eval_jobs_chan.0.subscribe();
+        match request.get_ref() {
+            proto::ListJobsRequest { builder_information: Some(builder_information) } => {
+                self.builders.write().await.insert(builder_information.uuid.unwrap().into(), builder_information.clone());
 
-        // TODO this thing here is most definitely racy
-        {
-            let tx = tx.clone();
-            let pending_eval_jobs = self.pending_eval_jobs.clone();
-            tokio::spawn(async move {
-                for eval_job in pending_eval_jobs.values() {
-                    println!("returning pending job {:?}", eval_job);
-                    tx.send(Ok(proto::ListJobsResponse {
-                        job: Some(eval_job.clone().into())
-                    })).await.unwrap();
+                let (tx, rx) = mpsc::channel(4);
+                let mut eval_jobs = self.eval_jobs_chan.0.subscribe();
+
+                // TODO this thing here is most definitely racy
+                {
+                    let tx = tx.clone();
+                    let pending_eval_jobs = self.pending_eval_jobs.read().await.clone();
+                    tokio::spawn(async move {
+                        for eval_job in pending_eval_jobs.values() {
+                            println!("returning pending job {:?}", eval_job);
+                            let _ = tx.send(Ok(proto::ListJobsResponse {
+                                job: Some(eval_job.clone().into())
+                            })).await;
+                        }
+                    });
+                };
+                {
+                    let builder_uuid = builder_information.uuid.unwrap().into();
+                    let builders = self.builders.clone();
+                    tokio::spawn(async move {
+                        while let Ok(eval_job) = eval_jobs.recv().await {
+                            match tx.send(Ok(proto::ListJobsResponse {
+                                job: Some(eval_job.into())
+                            })).await {
+                                Ok(_) => { /* all good */ },
+                                Err(_) => {
+                                    // closed
+                                    builders.write().await.remove(&builder_uuid);
+                                },
+                            };
+                        }
+                    });
                 }
-            });
-        };
-        tokio::spawn(async move {
-            while let Ok(eval_job) = eval_jobs.recv().await {
-                tx.send(Ok(proto::ListJobsResponse {
-                    job: Some(eval_job.into())
-                })).await.unwrap();
-            }
-        });
 
-        Ok(Response::new(ReceiverStream::new(rx)))
+                Ok(Response::new(ReceiverStream::new(rx)))
+            },
+            _ => panic!("builder didn't provide BuilderInformation")
+        }
     }
 
     async fn pick_job(
@@ -110,20 +128,21 @@ impl PubSubService {
 
         let route_guide = PubSubService {
             eval_jobs_chan: chan,
-            builders: Arc::new(RwLock::new(Vec::new())),
-            pending_eval_jobs: HashMap::new(),
+            builders: Arc::new(RwLock::new(HashMap::new())),
+            pending_eval_jobs: Arc::new(RwLock::new(HashMap::new())),
+            picked_eval_jobs: Arc::new(RwLock::new(HashMap::new())),
         };
 
         route_guide
     }
 
-    pub fn submit_eval_job(&mut self, eval_job: EvalJob) -> Result<usize> {
+    pub async fn submit_eval_job(&mut self, eval_job: EvalJob) -> Result<usize> {
         println!("new job");
 
         let uuid = Uuid::new_v4();
 
         let size = self.eval_jobs_chan.0.send(eval_job.clone())?;
-        self.pending_eval_jobs.insert(uuid, eval_job);
+        self.pending_eval_jobs.write().await.insert(uuid, eval_job);
         Ok(size)
     }
 }

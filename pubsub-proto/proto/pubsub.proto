@@ -81,9 +81,10 @@ message EvalJob {
 }
 
 message BuilderInformation {
-  string system = 1;
-  int32 smt_core_count = 2;
-  uint64 total_memory = 3;
+  UUID uuid = 1;
+  string system = 2;
+  int32 smt_core_count = 3;
+  uint64 total_memory = 4;
 }
 
 message Job {

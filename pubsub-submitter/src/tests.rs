@@ -91,13 +91,14 @@ async fn add_merchant_test() {
         {
             let eval_job = eval_job.clone();
             async |server| {
-                server.submit_eval_job(eval_job).unwrap();
+                server.submit_eval_job(eval_job).await.unwrap();
             }
         },
         async |mut client: PubSubClient<Channel>| {
             let response = client
             .list_jobs(Request::new(proto::ListJobsRequest {
                 builder_information: Some(proto::BuilderInformation {
+                    uuid: Some(Uuid::new_v4().into()),
                     system: String::from("x86_64-linux"),
                     smt_core_count: 32,
                     total_memory: 32 * 1024 * 1024 * 1024,
