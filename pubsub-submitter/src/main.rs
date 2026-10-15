@@ -1,4 +1,5 @@
 pub mod pubsub;
+pub mod queue;
 #[cfg(test)]
 mod tests;
 
