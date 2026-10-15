@@ -1,13 +1,15 @@
 [package]
-name = "pubsub-eval"
+name = "pubsub-proto"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 tonic = "*"
+tonic-prost = "*"
 prost = "0.14"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-stream = "0.1"
+uuid = { version = "1", features = ["v4"] }
 
 async-stream = "0.2"
 serde = { version = "1.0", features = ["derive"] }

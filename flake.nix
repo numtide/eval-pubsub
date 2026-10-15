@@ -36,6 +36,8 @@
             packages = with pkgs; [
               cargo
               rustc
+              rustfmt
+              nixfmt
               treefmtEval.config.build.wrapper
               protobuf
               rust-analyzer

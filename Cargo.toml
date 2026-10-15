@@ -1,3 +1,3 @@
 [workspace]
 resolver = "3"
-members = ["pubsub-builder", "pubsub-common","pubsub-proto", "pubsub-submitter"]
+members = ["pubsub-builder", "pubsub-client", "pubsub-common","pubsub-proto", "pubsub-submitter"]
