@@ -1,5 +1,5 @@
-use pubsub_proto as proto;
-use pubsub_proto::pub_sub_server::{PubSub, PubSubServer};
+use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
+use pubsub_proto::pubsub as proto;
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -34,14 +34,14 @@ impl Keyable for EvalJob {
     }
 }
 
-impl From<EvalJob> for proto::Job {
+impl From<EvalJob> for proto::server::Job {
     fn from(value: EvalJob) -> Self {
-        proto::Job {
+        proto::server::Job {
             job_id: Some(value.job_id.into()),
-            r#type: Some(proto::job::Type::Eval(proto::EvalJob {
+            r#type: Some(proto::server::job::Type::Eval(proto::common::EvalJob {
                 r#type: match value.r#type {
                     EvalJobType::Flake { flake_ref, attrs } => {
-                        Some(proto::eval_job::Type::Flake(proto::eval_job::Flake {
+                        Some(proto::common::eval_job::Type::Flake(proto::common::eval_job::Flake {
                             flake_ref,
                             attr: attrs,
                         }))
@@ -54,7 +54,7 @@ impl From<EvalJob> for proto::Job {
 
 struct BuilderState {
     sender: queue::Sender<EvalJob, Uuid>,
-    builder_information: proto::BuilderInformation,
+    builder_information: proto::server::BuilderInformation,
     task: JoinHandle<Box<dyn Future<Output = ()> + Send>>,
 }
 
@@ -68,13 +68,13 @@ pub struct PubSubService {
 
 #[tonic::async_trait]
 impl PubSub for PubSubService {
-    type ListJobsStream = ReceiverStream<Result<proto::ListJobsResponse, Status>>;
+    type ListJobsStream = ReceiverStream<Result<proto::server::ListJobsResponse, Status>>;
     async fn list_jobs(
         &self,
-        request: Request<proto::ListJobsRequest>,
+        request: Request<proto::server::ListJobsRequest>,
     ) -> Result<Response<Self::ListJobsStream>, Status> {
         match request.get_ref() {
-            proto::ListJobsRequest {
+            proto::server::ListJobsRequest {
                 builder_information: Some(builder_information),
             } => {
                 // TODO configurable?
@@ -90,7 +90,7 @@ impl PubSub for PubSubService {
                         task: tokio::spawn(Box::pin(async move {
                             println!("background filter started");
                             for eval_job in pending_eval_jobs.read().await.values() {
-                                tx.send(Ok(proto::ListJobsResponse {
+                                tx.send(Ok(proto::server::ListJobsResponse {
                                     job: Some(eval_job.clone().into()),
                                 }))
                                 .await
@@ -100,7 +100,7 @@ impl PubSub for PubSubService {
                             loop {
                                 match receiver.pop().await {
                                     Some(eval_job) => {
-                                        tx.send(Ok(proto::ListJobsResponse {
+                                        tx.send(Ok(proto::server::ListJobsResponse {
                                             job: Some(eval_job.clone().into()),
                                         }))
                                         .await
@@ -121,10 +121,10 @@ impl PubSub for PubSubService {
 
     async fn pick_job(
         &self,
-        request: Request<proto::PickJobRequest>,
-    ) -> Result<Response<proto::PickJobResponse>, Status> {
+        request: Request<proto::server::PickJobRequest>,
+    ) -> Result<Response<proto::server::PickJobResponse>, Status> {
         match request.get_ref() {
-            proto::PickJobRequest {
+            proto::server::PickJobRequest {
                 job_id: Some(job_id),
             } => {
                 let job_id = (*job_id).into();
@@ -138,9 +138,9 @@ impl PubSub for PubSubService {
                             .ok_or(())
                             .expect_err("cannot pick a already picked job, this shouldn't happen");
 
-                        Ok(Response::new(proto::PickJobResponse {
-                            pick_response: Some(proto::pick_job_response::PickResponse::Allow(
-                                proto::pick_job_response::Allow {},
+                        Ok(Response::new(proto::server::PickJobResponse {
+                            pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(
+                                proto::server::pick_job_response::Allow {},
                             )),
                         }))
                     }
@@ -156,15 +156,15 @@ impl PubSub for PubSubService {
 
     async fn conclude_job(
         &self,
-        _request: Request<proto::ConcludeJobRequest>,
-    ) -> Result<Response<proto::ConcludeJobResponse>, Status> {
+        _request: Request<proto::server::ConcludeJobRequest>,
+    ) -> Result<Response<proto::server::ConcludeJobResponse>, Status> {
         unimplemented!();
     }
 
     async fn job_output(
         &self,
-        _request: Request<proto::JobOutputRequest>,
-    ) -> Result<Response<proto::JobOutputResponse>, Status> {
+        _request: Request<proto::server::JobOutputRequest>,
+    ) -> Result<Response<proto::server::JobOutputResponse>, Status> {
         unimplemented!();
     }
 }

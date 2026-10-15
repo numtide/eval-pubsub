@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package pubsub.client;
+
+import "common.proto";
+
+service PubSubClient {
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse) {}
+  rpc TailJob(TailJobRequest) returns (stream TailJobResponse) {}
+  rpc WaitJob(WaitJobRequest) returns (WaitJobResponse) {}
+}
+
+message SubmitJobRequest {
+  oneof type {
+    common.EvalJob eval = 1;
+    common.BuildJob build = 2;
+  }
+}
+
+message SubmitJobResponse {
+  common.UUID job_id = 1;
+}
+
+message TailJobRequest {
+  common.UUID job_id = 1;
+}
+
+message TailJobResponse {
+  string line = 1;
+}
+
+message WaitJobRequest {
+  common.UUID job_id = 1;
+}
+
+message WaitJobResponse {
+  common.JobStatus job_status = 2;
+}

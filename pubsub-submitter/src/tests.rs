@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use hyper_util::rt::TokioIo;
-use pubsub_proto::{self as proto, pub_sub_client::PubSubClient, pub_sub_server::PubSubServer};
+use pubsub_proto::pubsub::{self as proto, server::pub_sub_client::PubSubClient, server::pub_sub_server::PubSubServer};
 use tempfile::NamedTempFile;
 use tokio::{
     net::{UnixListener, UnixStream},
@@ -120,8 +120,8 @@ async fn end_to_end() {
             notify_submitted.notified().await;
 
             let response = client
-                .list_jobs(Request::new(proto::ListJobsRequest {
-                    builder_information: Some(proto::BuilderInformation {
+                .list_jobs(Request::new(proto::server::ListJobsRequest {
+                    builder_information: Some(proto::server::BuilderInformation {
                         uuid: Some(Uuid::new_v4().into()),
                         system: String::from("x86_64-linux"),
                         smt_core_count: 32,
@@ -135,7 +135,7 @@ async fn end_to_end() {
 
             let mut inbound_stream = response.into_inner();
 
-            let proto::ListJobsResponse { job } = inbound_stream
+            let proto::server::ListJobsResponse { job } = inbound_stream
                 .message()
                 .await
                 .unwrap()
@@ -143,7 +143,7 @@ async fn end_to_end() {
             let job_1 = job.expect("didn't return a job 1");
             assert_eq!(job_1, eval_job_1.into());
 
-            let proto::ListJobsResponse { job } = inbound_stream
+            let proto::server::ListJobsResponse { job } = inbound_stream
                 .message()
                 .await
                 .unwrap()
@@ -152,24 +152,24 @@ async fn end_to_end() {
             assert_eq!(job_2, eval_job_2.into());
 
             match client
-                .pick_job(Request::new(proto::PickJobRequest {
+                .pick_job(Request::new(proto::server::PickJobRequest {
                     job_id: job_1.job_id,
                 }))
                 .await
                 .unwrap()
                 .get_ref()
             {
-                proto::PickJobResponse {
-                    pick_response: Some(proto::pick_job_response::PickResponse::Allow(_)),
+                proto::server::PickJobResponse {
+                    pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(_)),
                 } => {
                     println!("successfully picked a job")
                 }
-                proto::PickJobResponse {
-                    pick_response: Some(proto::pick_job_response::PickResponse::Deny(_)),
+                proto::server::PickJobResponse {
+                    pick_response: Some(proto::server::pick_job_response::PickResponse::Deny(_)),
                 } => {
                     panic!("server denied the pick when an allow was expected")
                 }
-                proto::PickJobResponse {
+                proto::server::PickJobResponse {
                     pick_response: None,
                 } => panic!("server didn't return a pick response"),
             };

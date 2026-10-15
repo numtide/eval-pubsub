@@ -1,6 +1,8 @@
 syntax = "proto3";
 
-package pubsub;
+package pubsub.server;
+
+import "common.proto";
 
 service PubSub {
   rpc ListJobs(ListJobsRequest) returns (stream ListJobsResponse) {}
@@ -18,7 +20,7 @@ message ListJobsResponse {
 }
 
 message JobOutputRequest {
-  UUID job_id = 1;
+  common.UUID job_id = 1;
   repeated string output = 2;
 }
 
@@ -27,7 +29,7 @@ message JobOutputResponse {
 }
 
 message PickJobRequest {
-  UUID job_id = 1;
+  common.UUID job_id = 1;
 }
 
 message PickJobResponse {
@@ -46,56 +48,24 @@ message PickJobResponse {
 }
 
 message ConcludeJobRequest {
-  message Success {
-
-  }
-
-  message Failure {
-
-  }
-
-  UUID job_id = 1;
-  oneof result {
-    Success success = 2;
-    Failure failure = 3;
-  }
+  common.UUID job_id = 1;
 }
 
 message ConcludeJobResponse {
 
 }
 
-message BuildJob {
-  string derivation = 1;
-}
-
-message EvalJob {
-  message Flake {
-    string flake_ref = 1;
-    repeated string attr = 2;
-  }
-
-  oneof type {
-    Flake flake = 1;
-  }
-}
-
 message BuilderInformation {
-  UUID uuid = 1;
+  common.UUID uuid = 1;
   string system = 2;
   int32 smt_core_count = 3;
   uint64 total_memory = 4;
 }
 
 message Job {
-  UUID job_id = 1;
+  common.UUID job_id = 1;
   oneof type {
-    EvalJob eval = 2;
-    BuildJob build = 3;
+    common.EvalJob eval = 2;
+    common.BuildJob build = 3;
   }
-}
-
-message UUID {
-  fixed64 hi = 1;
-  fixed64 lo = 2;
 }

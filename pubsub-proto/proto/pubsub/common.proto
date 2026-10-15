@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package pubsub.common;
+
+message BuildJob {
+  string derivation = 1;
+}
+
+message EvalJob {
+  message Flake {
+    string flake_ref = 1;
+    repeated string attr = 2;
+  }
+
+  oneof type {
+    Flake flake = 1;
+  }
+}
+
+message UUID {
+  fixed64 hi = 1;
+  fixed64 lo = 2;
+}
+
+message JobStatus {
+  message Success {
+
+  }
+
+  message Failure {
+
+  }
+
+  oneof result {
+    Success success = 2;
+    Failure failure = 3;
+  }
+}

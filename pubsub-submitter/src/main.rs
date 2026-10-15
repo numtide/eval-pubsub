@@ -3,7 +3,7 @@ pub mod queue;
 #[cfg(test)]
 mod tests;
 
-use pubsub_proto::pub_sub_server::PubSubServer;
+use pubsub_proto::pubsub::server::pub_sub_server::PubSubServer;
 use tonic::transport::Server;
 
 use std::sync::Arc;
