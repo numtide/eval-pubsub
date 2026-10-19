@@ -1,6 +1,8 @@
 pub mod error;
+pub mod models;
 pub mod pubsub;
 pub mod queue;
+pub mod schema;
 #[cfg(test)]
 mod tests;
 
@@ -10,8 +12,7 @@ use tonic::transport::Server;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "[::1]:10000".parse().unwrap();
-
-    let svc = pubsub::PubSubService::new();
+    let svc = pubsub::PubSubService::new("")?;
 
     Server::builder()
         .add_service(PubSubServer::new(svc))

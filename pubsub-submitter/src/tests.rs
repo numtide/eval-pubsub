@@ -35,7 +35,10 @@ where
     let uds = UnixListener::bind(&*socket).unwrap();
     let stream = UnixListenerStream::new(uds);
 
-    let pubsub_service = pubsub::PubSubService::new();
+    let mut pubsub_service =
+        pubsub::PubSubService::new(std::env::var("DATABASE_URL").unwrap()).unwrap();
+    pubsub_service.clear_db().await;
+    pubsub_service.run_migrations().unwrap();
     tokio::spawn(other(pubsub_service.clone()));
     let serve_future = async move {
         let result = Server::builder()

@@ -33,8 +33,16 @@
         in
         {
           default = pkgs.mkShell {
+            shellHook = ''
+              export FLAKE_ROOT=$PWD
+              export DATABASE_URL="postgres://postgres:mysecretpassword@pubsub?host=$(realpath $FLAKE_ROOT/postgres/)"
+
+              . ${./shell-hook.sh}
+            '';
+
             packages = with pkgs; [
               cargo
+              cargo-expand
               rustc
               rustfmt
               nixfmt
@@ -42,6 +50,9 @@
               protobuf
               rust-analyzer
               plantuml
+              diesel-cli
+              podman
+              libpq
             ];
           };
         };

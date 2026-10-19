@@ -1,6 +1,26 @@
 use std::{io, ops::Deref};
 
+use diesel_async::pooled_connection::deadpool::PoolError;
 use thiserror::Error;
+
+pub trait ThroughProtocolError {
+    type Value;
+    fn through(self) -> Result<Self::Value, SubmitterError>;
+}
+
+impl<T, E> ThroughProtocolError for Result<T, E>
+where
+    E: Into<SubmitterError>,
+{
+    type Value = T;
+
+    fn through(self) -> Result<Self::Value, SubmitterError> {
+        match self {
+            Ok(ok) => Ok(ok),
+            Err(err) => Err(err.into()),
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum ProtocolError {
@@ -33,6 +53,12 @@ pub enum SubmitterError {
     JobNotFound { job_uuid: uuid::Uuid },
     #[error("job {job_uuid} was picked twice")]
     JobPickedTwice { job_uuid: uuid::Uuid },
+    #[error("database pool error {0}")]
+    DatabasePool(#[from] PoolError),
+    #[error("database  error {0}")]
+    Database(#[from] diesel::result::Error),
+    #[error("unknown error")]
+    Unknown,
 }
 
 impl From<SubmitterError> for tonic::Status {
@@ -48,7 +74,18 @@ impl From<SubmitterError> for tonic::Status {
             SubmitterError::JobPickedTwice { job_uuid: _ } => {
                 tonic::Status::internal(value.to_string())
             }
+            SubmitterError::DatabasePool(pool_error) => {
+                tonic::Status::internal(pool_error.to_string())
+            }
+            SubmitterError::Database(error) => tonic::Status::internal(error.to_string()),
+            SubmitterError::Unknown => tonic::Status::internal("unknown error"),
         }
+    }
+}
+
+impl From<()> for SubmitterError {
+    fn from(value: ()) -> Self {
+        SubmitterError::Unknown
     }
 }
 
