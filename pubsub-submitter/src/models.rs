@@ -64,6 +64,22 @@ pub struct ConcludedEvalJob {
 }
 
 #[derive(Queryable, Selectable, Debug, Insertable)]
+#[diesel(table_name = crate::schema::job_output)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct JobOutput {
+    pub id: i64,
+    pub job_id: Uuid,
+    pub line: String,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = crate::schema::job_output)]
+pub struct NewJobOutput<'a> {
+    pub job_id: Uuid,
+    pub line: &'a str,
+}
+
+#[derive(Queryable, Selectable, Debug, Insertable)]
 #[diesel(table_name = crate::schema::eval_job)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct EvalJob {

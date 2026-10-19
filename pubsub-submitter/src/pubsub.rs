@@ -20,10 +20,10 @@ use uuid::Uuid;
 
 use crate::error::{ProtocolError, SubmitterError};
 use crate::queue::{self as queue, Keyable};
-use crate::schema::concluded_eval_job::dsl as concluded_eval_job_dsl;
-use crate::schema::eval_job::dsl as eval_job_dsl;
-use crate::schema::pending_eval_job::dsl as pending_eval_job_dsl;
-use crate::schema::picked_eval_job::dsl as picked_eval_job_dsl;
+use crate::schema::eval_job;
+use crate::schema::pending_eval_job;
+use crate::schema::picked_eval_job;
+use crate::schema::{concluded_eval_job, job_output};
 use crate::{error::ThroughProtocolError, models, schema};
 
 pub const MIGRATIONS: diesel_migrations::EmbeddedMigrations =
@@ -101,7 +101,7 @@ impl PubSub for PubSubService {
         let (tx, rx) = mpsc::channel(1);
 
         let mut conn = self.pg_pool.get().await.through()?;
-        let pending_eval_jobs: Vec<EvalJob> = eval_job_dsl::eval_job
+        let pending_eval_jobs: Vec<EvalJob> = eval_job::dsl::eval_job
             .select(models::EvalJob::as_select())
             .load(&mut conn)
             .await
@@ -169,7 +169,8 @@ impl PubSub for PubSubService {
         let mut conn = self.pg_pool.get().await.through()?;
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
             let pending_job: Option<models::PendingEvalJob> = diesel::delete(
-                pending_eval_job_dsl::pending_eval_job.filter(pending_eval_job_dsl::id.eq(job_id)),
+                pending_eval_job::dsl::pending_eval_job
+                    .filter(pending_eval_job::dsl::id.eq(job_id)),
             )
             .get_result::<models::PendingEvalJob>(&mut conn)
             .await
@@ -177,7 +178,7 @@ impl PubSub for PubSubService {
 
             match pending_job {
                 Some(eval_job) => {
-                    diesel::insert_into(picked_eval_job_dsl::picked_eval_job)
+                    diesel::insert_into(picked_eval_job::dsl::picked_eval_job)
                         .values(&vec![models::PickedEvalJob { id: eval_job.id }])
                         .execute(&mut conn)
                         .await
@@ -191,8 +192,8 @@ impl PubSub for PubSubService {
                 }
                 None => {
                     let eval_job: Option<models::PickedEvalJob> =
-                        picked_eval_job_dsl::picked_eval_job
-                            .filter(picked_eval_job_dsl::id.eq(job_id))
+                        picked_eval_job::dsl::picked_eval_job
+                            .filter(picked_eval_job::dsl::id.eq(job_id))
                             .select(models::PickedEvalJob::as_select())
                             .first(&mut conn)
                             .await
@@ -229,7 +230,7 @@ impl PubSub for PubSubService {
         let mut conn = self.pg_pool.get().await.through()?;
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
             let picked_job: Option<models::PickedEvalJob> = diesel::delete(
-                picked_eval_job_dsl::picked_eval_job.filter(picked_eval_job_dsl::id.eq(job_id)),
+                picked_eval_job::dsl::picked_eval_job.filter(picked_eval_job::dsl::id.eq(job_id)),
             )
             .get_result::<models::PickedEvalJob>(&mut conn)
             .await
@@ -237,7 +238,7 @@ impl PubSub for PubSubService {
 
             match picked_job {
                 Some(eval_job) => {
-                    diesel::insert_into(concluded_eval_job_dsl::concluded_eval_job)
+                    diesel::insert_into(concluded_eval_job::dsl::concluded_eval_job)
                         .values(&vec![models::ConcludedEvalJob { id: eval_job.id }])
                         .execute(&mut conn)
                         .await
@@ -264,10 +265,27 @@ impl PubSub for PubSubService {
             .into();
         let output: &Vec<String> = &request.get_ref().output;
 
-        println!("got job {job_id} output:");
-        for line in output {
-            println!("  {line}");
-        }
+        let mut conn = self.pg_pool.get().await.through()?;
+        conn.transaction::<_, SubmitterError, _>(async |mut conn| {
+            diesel::insert_into(job_output::dsl::job_output)
+                .values(
+                    output
+                        .into_iter()
+                        .map(|line| models::NewJobOutput { job_id, line })
+                        .collect::<Vec<_>>(),
+                )
+                .execute(&mut conn)
+                .await?;
+
+            println!("got job {job_id} output:");
+            for line in output {
+                println!("  {line}");
+            }
+
+            Ok(())
+        })
+        .await
+        .map_err(Into::<SubmitterError>::into)?;
 
         Ok(Response::new(proto::server::JobOutputResponse {}))
     }
@@ -321,12 +339,12 @@ impl PubSubService {
 
             conn.transaction::<_, SubmitterError, _>(async |mut conn| {
                 let job_id = eval_job.job_id;
-                diesel::insert_into(eval_job_dsl::eval_job)
+                diesel::insert_into(eval_job::dsl::eval_job)
                     .values(&vec![Into::<models::EvalJob>::into(eval_job)])
                     .execute(&mut conn)
                     .await?;
 
-                diesel::insert_into(pending_eval_job_dsl::pending_eval_job)
+                diesel::insert_into(pending_eval_job::dsl::pending_eval_job)
                     .values(&vec![models::PendingEvalJob { id: job_id }])
                     .execute(&mut conn)
                     .await?;

@@ -26,6 +26,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    job_output (id) {
+        id -> Int8,
+        job_id -> Uuid,
+        time -> Nullable<Timestamp>,
+        line -> Text,
+    }
+}
+
+diesel::table! {
     pending_eval_job (id) {
         id -> Uuid,
     }
@@ -38,12 +47,14 @@ diesel::table! {
 }
 
 diesel::joinable!(concluded_eval_job -> eval_job (id));
+diesel::joinable!(job_output -> eval_job (job_id));
 diesel::joinable!(pending_eval_job -> eval_job (id));
 diesel::joinable!(picked_eval_job -> eval_job (id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     concluded_eval_job,
     eval_job,
+    job_output,
     pending_eval_job,
     picked_eval_job,
 );
