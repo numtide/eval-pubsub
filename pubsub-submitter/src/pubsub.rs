@@ -62,6 +62,7 @@ struct BuilderState {
 pub struct PubSubService {
     pending_eval_jobs: Arc<RwLock<HashMap<Uuid, EvalJob>>>,
     picked_eval_jobs: Arc<RwLock<HashMap<Uuid, EvalJob>>>,
+    concluded_eval_jobs: Arc<RwLock<HashMap<Uuid, EvalJob>>>,
 
     builder_states: Arc<RwLock<HashMap<Uuid, BuilderState>>>,
 }
@@ -141,9 +142,11 @@ impl PubSub for PubSubService {
         match self.pending_eval_jobs.write().await.remove(&job_id) {
             Some(eval_job) => {
                 match self.picked_eval_jobs.write().await.insert(job_id, eval_job) {
-                    Some(_) => Err(SubmitterError::JobPickedTwice { job_uuid: job_id }),
-                    None => Ok(()),
-                }?;
+                    Some(_) => {
+                        panic!("pending job is picked and pending at the same time, not allowed")
+                    }
+                    None => {}
+                };
 
                 Ok(Response::new(proto::server::PickJobResponse {
                     pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(
@@ -151,22 +154,66 @@ impl PubSub for PubSubService {
                     )),
                 }))
             }
-            None => Err(SubmitterError::JobNotFound { job_uuid: job_id }.into()),
+            None => match self.picked_eval_jobs.read().await.get(&job_id) {
+                Some(_) => Ok(Response::new(proto::server::PickJobResponse {
+                    pick_response: Some(proto::server::pick_job_response::PickResponse::Deny(
+                        proto::server::pick_job_response::Deny {},
+                    )),
+                })),
+                None => Err(SubmitterError::JobNotFound { job_uuid: job_id }.into()),
+            },
         }
     }
 
     async fn conclude_job(
         &self,
-        _request: Request<proto::server::ConcludeJobRequest>,
+        request: Request<proto::server::ConcludeJobRequest>,
     ) -> Result<Response<proto::server::ConcludeJobResponse>, Status> {
-        unimplemented!();
+        let job_id = request
+            .get_ref()
+            .job_id
+            .as_ref()
+            .ok_or(ProtocolError::field_missing(&["job_id"]))?
+            .into();
+
+        match self.picked_eval_jobs.write().await.remove(&job_id) {
+            Some(eval_job) => {
+                match self
+                    .concluded_eval_jobs
+                    .write()
+                    .await
+                    .insert(job_id, eval_job)
+                {
+                    Some(_) => {
+                        panic!("picked job is concluded and picked at the same time, not allowed");
+                    }
+                    None => {}
+                }
+
+                Ok(Response::new(proto::server::ConcludeJobResponse {}))
+            }
+            None => Err(SubmitterError::JobNotFound { job_uuid: job_id }.into()),
+        }
     }
 
     async fn job_output(
         &self,
-        _request: Request<proto::server::JobOutputRequest>,
+        request: Request<proto::server::JobOutputRequest>,
     ) -> Result<Response<proto::server::JobOutputResponse>, Status> {
-        unimplemented!();
+        let job_id: Uuid = request
+            .get_ref()
+            .job_id
+            .as_ref()
+            .ok_or(ProtocolError::field_missing(&["job_id"]))?
+            .into();
+        let output: &Vec<String> = &request.get_ref().output;
+
+        println!("got job {job_id} output:");
+        for line in output {
+            println!("  {line}");
+        }
+
+        Ok(Response::new(proto::server::JobOutputResponse {}))
     }
 }
 
@@ -175,6 +222,7 @@ impl PubSubService {
         let pub_sub_service = PubSubService {
             pending_eval_jobs: Arc::new(RwLock::new(HashMap::new())),
             picked_eval_jobs: Arc::new(RwLock::new(HashMap::new())),
+            concluded_eval_jobs: Arc::new(RwLock::new(HashMap::new())),
 
             builder_states: Arc::new(RwLock::new(HashMap::new())),
         };
@@ -190,13 +238,12 @@ impl PubSubService {
             .insert(eval_job.job_id, eval_job.clone());
 
         for (builder_uuid, builder_state) in self.builder_states.write().await.iter_mut() {
-            match builder_state
-                .sender
-                .push(eval_job.clone())
-                .await {
-                    Some(_) => Err(SubmitterError::JobSend { builder_uuid: *builder_uuid }),
-                    None => Ok(()),
-                }?
+            match builder_state.sender.push(eval_job.clone()).await {
+                Some(_) => Err(SubmitterError::JobSend {
+                    builder_uuid: *builder_uuid,
+                }),
+                None => Ok(()),
+            }?
         }
 
         Ok(())

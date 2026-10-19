@@ -175,6 +175,65 @@ async fn end_to_end() {
                     pick_response: None,
                 } => panic!("server didn't return a pick response"),
             };
+
+            match client
+                .pick_job(Request::new(proto::server::PickJobRequest {
+                    job_id: job_1.job_id,
+                }))
+                .await
+                .unwrap()
+                .get_ref()
+            {
+                proto::server::PickJobResponse {
+                    pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(_)),
+                } => panic!("server allowed a pick when the job has been already picked by us"),
+                proto::server::PickJobResponse {
+                    pick_response: Some(proto::server::pick_job_response::PickResponse::Deny(_)),
+                } => println!("successfully failed to double pick a job"),
+                proto::server::PickJobResponse {
+                    pick_response: None,
+                } => panic!("server didn't return a pick response"),
+            }
+
+            client
+                .job_output(Request::new(proto::server::JobOutputRequest {
+                    job_id: job_1.job_id,
+                    output: vec![
+                        "job 1 has been started",
+                        "churnining....",
+                        "almost done......",
+                        "done!",
+                    ]
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                }))
+                .await
+                .unwrap();
+
+            match client
+                .conclude_job(Request::new(proto::server::ConcludeJobRequest {
+                    job_id: job_1.job_id,
+                }))
+                .await
+                .unwrap()
+                .get_ref()
+            {
+                proto::server::ConcludeJobResponse {} => println!("concluded job!"),
+            };
+
+            match client
+                .pick_job(Request::new(proto::server::PickJobRequest {
+                    job_id: job_1.job_id,
+                }))
+                .await
+            {
+                Ok(_) => panic!("received unexpected allow/deny for a known concluded job"),
+                Err(status) if status.code() == tonic::Code::NotFound => {
+                    println!("job was successfully reported as not found, since it's concluded")
+                }
+                Err(_) => panic!("received another error than \"not found\""),
+            }
         }
     );
 }
