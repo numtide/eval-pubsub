@@ -1,5 +1,6 @@
 pub mod error;
 pub mod models;
+pub mod postgres;
 pub mod pubsub;
 pub mod queue;
 pub mod schema;
