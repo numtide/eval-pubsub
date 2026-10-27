@@ -4,15 +4,16 @@ use diesel::{
     SelectableHelper as _,
 };
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
-use diesel_async::pooled_connection::deadpool::Pool;
+use diesel_async::pooled_connection::deadpool::{Object, Pool};
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _};
 use diesel_migrations::MigrationHarness as _;
 use pubsub_proto::pubsub as proto;
 use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, SetOnce, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -20,6 +21,7 @@ use uuid::Uuid;
 
 use crate::error::{ProtocolError, SubmitterError};
 use crate::queue::{self as queue, Keyable};
+use crate::schema::builder;
 use crate::schema::eval_job;
 use crate::schema::pending_eval_job;
 use crate::schema::picked_eval_job;
@@ -69,14 +71,9 @@ impl From<EvalJob> for proto::server::Job {
     }
 }
 
-struct BuilderState {
-    builder_information: proto::server::BuilderInformation,
-    tailer: Option<BuilderTailer>,
-}
-
 struct BuilderTailer {
     sender: queue::Sender<EvalJob, Uuid>,
-    task: JoinHandle<Box<dyn Future<Output = ()> + Send>>,
+    task: JoinHandle<()>,
 }
 
 #[derive(Clone)]
@@ -84,20 +81,26 @@ pub struct PubSubService {
     pg_pool: Pool<AsyncPgConnection>,
     database_url: String,
 
-    builder_states: Arc<RwLock<HashMap<Uuid, BuilderState>>>,
+    builder_states: Arc<RwLock<HashMap<Uuid, BuilderTailer>>>,
+    shutdown_cell: Arc<SetOnce<()>>,
 }
 
 impl PubSubService {
-    async fn check_registered(&self, builder_uuid: Uuid) -> Result<(), SubmitterError> {
-        if self
-            .builder_states
-            .write()
+    async fn check_registered(
+        &self,
+        conn: &mut Object<AsyncPgConnection>,
+        builder_uuid: Uuid,
+    ) -> Result<(), SubmitterError> {
+        let builder: Option<models::Builder> = builder::dsl::builder
+            .filter(builder::dsl::id.eq(builder_uuid))
+            .select(models::Builder::as_select())
+            .first(conn)
             .await
-            .contains_key(&builder_uuid)
-        {
-            Ok(())
-        } else {
-            Err(SubmitterError::Unregistered {})
+            .optional()?;
+
+        match builder {
+            Some(_builder) => Ok(()),
+            None => Err(SubmitterError::Unregistered {}),
         }
     }
 }
@@ -131,36 +134,52 @@ impl PubSub for PubSubService {
             .builder_information
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["builder_information"]))?;
+        let builder_uuid = builder_information
+            .uuid
+            .ok_or(ProtocolError::field_missing(&[
+                "builder_information",
+                "uuid",
+            ]))?
+            .into();
 
-        self.builder_states.write().await.insert(
-            builder_information
-                .uuid
-                .ok_or(ProtocolError::field_missing(&[
-                    "builder_information",
-                    "uuid",
-                ]))?
-                .into(),
-            BuilderState {
-                builder_information: builder_information.clone(),
-                tailer: None,
-            },
+        println!(
+            "builder {} registered: {:?}",
+            builder_uuid, builder_information
         );
 
-        Ok(Response::new(proto::server::RegisterResponse {}))
+        let mut conn = self.pg_pool.get().await.through()?;
+        conn.transaction::<_, SubmitterError, _>(async |mut conn| {
+            diesel::insert_into(builder::dsl::builder)
+                .values(&vec![models::Builder {
+                    id: builder_uuid,
+                    system: builder_information.system.clone(),
+                    smt_core_count: builder_information.smt_core_count,
+                    // TODO down sizing this value
+                    total_memory: builder_information.total_memory as i64,
+                    active: false,
+                }])
+                .execute(&mut conn)
+                .await
+                .expect("Failed to insert row");
+
+            Ok(Response::new(proto::server::RegisterResponse {}))
+        })
+        .await
+        .map_err(Into::into)
     }
 
     async fn list_jobs(
         &self,
         request: Request<proto::server::ListJobsRequest>,
     ) -> Result<Response<Self::ListJobsStream>, Status> {
+        let mut conn = self.pg_pool.get().await.through()?;
         let builder_uuid = get_uuid_from_request(request)?;
-        self.check_registered(builder_uuid).await?;
+        self.check_registered(&mut conn, builder_uuid).await?;
 
         // TODO configurable?
         let (sender, mut receiver) = queue::new(256);
         let (tx, rx) = mpsc::channel(1);
 
-        let mut conn = self.pg_pool.get().await.through()?;
         let pending_eval_jobs: Vec<EvalJob> = eval_job::dsl::eval_job
             .select(models::EvalJob::as_select())
             .load(&mut conn)
@@ -171,26 +190,35 @@ impl PubSub for PubSubService {
             .collect::<Result<Vec<EvalJob>, _>>()
             .map_err(Into::<SubmitterError>::into)?;
 
-        // TODO still racy
-        self.builder_states
-            .write()
-            .await
-            .entry(builder_uuid)
-            .and_modify(|builder_state| {
-                (*builder_state).tailer = Some(BuilderTailer {
-                    sender,
-                    task: tokio::spawn(Box::pin(async move {
-                        println!("background filter started");
-                        for eval_job in pending_eval_jobs {
-                            tx.send(Ok(proto::server::ListJobsResponse {
-                                job: Some(eval_job.clone().into()),
-                            }))
-                            .await
-                            .map_err(|_| SubmitterError::JobSend { builder_uuid })
-                            .unwrap();
-                        }
+        assert_eq!(
+            1,
+            diesel::update(builder::dsl::builder.filter(builder::dsl::id.eq(builder_uuid)))
+                .set(builder::dsl::active.eq(true))
+                .execute(&mut conn)
+                .await
+                .map_err(Into::<SubmitterError>::into)?
+        );
 
-                        loop {
+        let shutdown_cell = self.shutdown_cell.clone();
+        // TODO still racy
+        self.builder_states.write().await.insert(
+            builder_uuid,
+            BuilderTailer {
+                sender,
+                task: tokio::spawn(async move {
+                    println!("background filter started");
+                    for eval_job in pending_eval_jobs {
+                        tx.send(Ok(proto::server::ListJobsResponse {
+                            job: Some(eval_job.clone().into()),
+                        }))
+                        .await
+                        .map_err(|_| SubmitterError::JobSend { builder_uuid })
+                        .unwrap();
+                    }
+
+                    tokio::select! {
+                        _ = async move {
+                          loop {
                             match receiver.pop().await {
                                 Some(eval_job) => {
                                     tx.send(Ok(proto::server::ListJobsResponse {
@@ -203,10 +231,25 @@ impl PubSub for PubSubService {
                                 // no more jobs, shutting down
                                 None => {}
                             }
-                        }
-                    })),
-                });
-            });
+                          }
+                        } => {},
+                        _ = shutdown_cell.wait() => {}
+                    };
+
+                    assert_eq!(
+                        1,
+                        diesel::update(
+                            builder::dsl::builder.filter(builder::dsl::id.eq(builder_uuid))
+                        )
+                        .set(builder::dsl::active.eq(false))
+                        .execute(&mut conn)
+                        .await
+                        .map_err(Into::<SubmitterError>::into)
+                        .expect("failed to update builder active state")
+                    );
+                }),
+            },
+        );
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -348,6 +391,15 @@ impl PubSub for PubSubService {
 }
 
 impl PubSubService {
+    pub async fn wait_shutdown(self) {
+        println!("collecting builder tailers");
+        self.shutdown_cell.set(()).unwrap();
+        for (uuid, builder_tailer) in self.builder_states.write().await.drain() {
+            println!("tailer done {}", uuid);
+            builder_tailer.task.await.unwrap()
+        }
+    }
+
     pub fn new<S>(database_url: S) -> Result<PubSubService, Box<dyn std::error::Error>>
     where
         S: AsRef<str>,
@@ -360,6 +412,7 @@ impl PubSubService {
             builder_states: Arc::new(RwLock::new(HashMap::new())),
             pg_pool: pool,
             database_url: database_url.as_ref().to_owned(),
+            shutdown_cell: Arc::new(SetOnce::new()),
         };
 
         Ok(pub_sub_service)
@@ -411,16 +464,13 @@ impl PubSubService {
             .map_err(Into::<SubmitterError>::into)?;
         }
 
-        for (builder_uuid, builder_state) in self.builder_states.write().await.iter_mut() {
-            match &mut builder_state.tailer {
-                Some(tailer) => match tailer.sender.push(eval_job.clone()).await {
-                    Some(_) => Err(SubmitterError::JobSend {
-                        builder_uuid: *builder_uuid,
-                    }),
-                    None => Ok(()),
-                }?,
-                None => todo!(),
-            }
+        for (builder_uuid, builder_tailer) in self.builder_states.write().await.iter_mut() {
+            match builder_tailer.sender.push(eval_job.clone()).await {
+                Some(_) => Err(SubmitterError::JobSend {
+                    builder_uuid: *builder_uuid,
+                }),
+                None => Ok(()),
+            }?
         }
 
         Ok(())

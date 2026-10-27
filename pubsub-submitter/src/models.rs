@@ -129,3 +129,15 @@ impl TryFrom<EvalJob> for super::pubsub::EvalJob {
         }
     }
 }
+
+#[derive(Queryable, Selectable, Debug, Insertable)]
+#[diesel(table_name = crate::schema::builder)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct Builder {
+    pub id: Uuid,
+    pub system: String,
+    pub smt_core_count: i32,
+    // TODO this really ought to be u64 but that would need a postgresl extension
+    pub total_memory: i64,
+    pub active: bool,
+}

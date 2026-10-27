@@ -156,6 +156,7 @@ where
             tokio::spawn(setup(pubsub_service.clone()));
             let serve_future = {
                 let shutdown = shutdown.clone();
+                let pubsub_service = pubsub_service.clone();
                 async move {
                     let result = Server::builder()
                         .add_service(PubSubServer::new(pubsub_service))
@@ -185,7 +186,7 @@ where
 
             tokio::select! {
                 _ = serve_future => panic!("server returned first"),
-                res = run_future => { shutdown.notify_one(); res },
+                res = run_future => { shutdown.notify_one(); pubsub_service.wait_shutdown().await; res },
             }
         },
     )

@@ -7,6 +7,16 @@ pub mod sql_types {
 }
 
 diesel::table! {
+    builder (id) {
+        id -> Uuid,
+        system -> Text,
+        smt_core_count -> Int4,
+        total_memory -> Int8,
+        active -> Bool,
+    }
+}
+
+diesel::table! {
     concluded_eval_job (id) {
         id -> Uuid,
     }
@@ -52,6 +62,7 @@ diesel::joinable!(pending_eval_job -> eval_job (id));
 diesel::joinable!(picked_eval_job -> eval_job (id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    builder,
     concluded_eval_job,
     eval_job,
     job_output,
