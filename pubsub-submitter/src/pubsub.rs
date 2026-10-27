@@ -70,8 +70,12 @@ impl From<EvalJob> for proto::server::Job {
 }
 
 struct BuilderState {
-    sender: queue::Sender<EvalJob, Uuid>,
     builder_information: proto::server::BuilderInformation,
+    tailer: Option<BuilderTailer>,
+}
+
+struct BuilderTailer {
+    sender: queue::Sender<EvalJob, Uuid>,
     task: JoinHandle<Box<dyn Future<Output = ()> + Send>>,
 }
 
@@ -83,18 +87,74 @@ pub struct PubSubService {
     builder_states: Arc<RwLock<HashMap<Uuid, BuilderState>>>,
 }
 
+impl PubSubService {
+    async fn check_registered(&self, builder_uuid: Uuid) -> Result<(), SubmitterError> {
+        if self
+            .builder_states
+            .write()
+            .await
+            .contains_key(&builder_uuid)
+        {
+            Ok(())
+        } else {
+            Err(SubmitterError::Unregistered {})
+        }
+    }
+}
+
+fn get_uuid_from_request<T>(request: Request<T>) -> Result<Uuid, SubmitterError> {
+    request
+        .metadata()
+        .get("x-builder-uuid")
+        .ok_or(ProtocolError::metadata_missing("uuid"))
+        .and_then(|metadata_value| {
+            metadata_value
+                .to_str()
+                .map_err(|_| ProtocolError::metadata_invalid("uuid"))
+        })
+        .and_then(|metadata_value| {
+            Uuid::parse_str(metadata_value).map_err(|_| ProtocolError::metadata_invalid("uuid"))
+        })
+        .map_err(Into::into)
+}
+
 #[tonic::async_trait]
 impl PubSub for PubSubService {
     type ListJobsStream = ReceiverStream<Result<proto::server::ListJobsResponse, Status>>;
-    async fn list_jobs(
+
+    async fn register(
         &self,
-        request: Request<proto::server::ListJobsRequest>,
-    ) -> Result<Response<Self::ListJobsStream>, Status> {
+        request: Request<proto::server::RegisterRequest>,
+    ) -> Result<Response<proto::server::RegisterResponse>, Status> {
         let builder_information = request
             .get_ref()
             .builder_information
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["builder_information"]))?;
+
+        self.builder_states.write().await.insert(
+            builder_information
+                .uuid
+                .ok_or(ProtocolError::field_missing(&[
+                    "builder_information",
+                    "uuid",
+                ]))?
+                .into(),
+            BuilderState {
+                builder_information: builder_information.clone(),
+                tailer: None,
+            },
+        );
+
+        Ok(Response::new(proto::server::RegisterResponse {}))
+    }
+
+    async fn list_jobs(
+        &self,
+        request: Request<proto::server::ListJobsRequest>,
+    ) -> Result<Response<Self::ListJobsStream>, Status> {
+        let builder_uuid = get_uuid_from_request(request)?;
+        self.check_registered(builder_uuid).await?;
 
         // TODO configurable?
         let (sender, mut receiver) = queue::new(256);
@@ -111,46 +171,42 @@ impl PubSub for PubSubService {
             .collect::<Result<Vec<EvalJob>, _>>()
             .map_err(Into::<SubmitterError>::into)?;
 
-        let builder_uuid = builder_information
-            .uuid
-            .ok_or(ProtocolError::field_missing(&[
-                "builder_information",
-                "uuid",
-            ]))?
-            .into();
         // TODO still racy
-        self.builder_states.write().await.insert(
-            builder_uuid,
-            BuilderState {
-                sender,
-                builder_information: builder_information.clone(),
-                task: tokio::spawn(Box::pin(async move {
-                    println!("background filter started");
-                    for eval_job in pending_eval_jobs {
-                        tx.send(Ok(proto::server::ListJobsResponse {
-                            job: Some(eval_job.clone().into()),
-                        }))
-                        .await
-                        .map_err(|_| SubmitterError::JobSend { builder_uuid })
-                        .unwrap();
-                    }
-
-                    loop {
-                        match receiver.pop().await {
-                            Some(eval_job) => {
-                                tx.send(Ok(proto::server::ListJobsResponse {
-                                    job: Some(eval_job.clone().into()),
-                                }))
-                                .await
-                                .map_err(|_| SubmitterError::JobSend { builder_uuid })
-                                .unwrap();
-                            }
-                            None => todo!(),
+        self.builder_states
+            .write()
+            .await
+            .entry(builder_uuid)
+            .and_modify(|builder_state| {
+                (*builder_state).tailer = Some(BuilderTailer {
+                    sender,
+                    task: tokio::spawn(Box::pin(async move {
+                        println!("background filter started");
+                        for eval_job in pending_eval_jobs {
+                            tx.send(Ok(proto::server::ListJobsResponse {
+                                job: Some(eval_job.clone().into()),
+                            }))
+                            .await
+                            .map_err(|_| SubmitterError::JobSend { builder_uuid })
+                            .unwrap();
                         }
-                    }
-                })),
-            },
-        );
+
+                        loop {
+                            match receiver.pop().await {
+                                Some(eval_job) => {
+                                    tx.send(Ok(proto::server::ListJobsResponse {
+                                        job: Some(eval_job.clone().into()),
+                                    }))
+                                    .await
+                                    .map_err(|_| SubmitterError::JobSend { builder_uuid })
+                                    .unwrap();
+                                }
+                                // no more jobs, shutting down
+                                None => {}
+                            }
+                        }
+                    })),
+                });
+            });
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -356,12 +412,15 @@ impl PubSubService {
         }
 
         for (builder_uuid, builder_state) in self.builder_states.write().await.iter_mut() {
-            match builder_state.sender.push(eval_job.clone()).await {
-                Some(_) => Err(SubmitterError::JobSend {
-                    builder_uuid: *builder_uuid,
-                }),
-                None => Ok(()),
-            }?
+            match &mut builder_state.tailer {
+                Some(tailer) => match tailer.sender.push(eval_job.clone()).await {
+                    Some(_) => Err(SubmitterError::JobSend {
+                        builder_uuid: *builder_uuid,
+                    }),
+                    None => Ok(()),
+                }?,
+                None => todo!(),
+            }
         }
 
         Ok(())

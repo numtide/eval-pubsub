@@ -13,6 +13,8 @@ use tokio_postgres::{Config, NoTls};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{
     Request,
+    metadata::MetadataValue,
+    service::{Interceptor, interceptor::InterceptedService},
     transport::{Channel, Endpoint, Server, Uri},
 };
 use tower::service_fn;
@@ -100,11 +102,41 @@ where
     ret
 }
 
-async fn server_and_client_stub<Setup, SetupFuture, Run, RunFuture, A>(setup: Setup, run: Run) -> A
+struct StandardInterceptor {
+    builder_uuid: Uuid,
+}
+
+impl StandardInterceptor {
+    fn new(builder_uuid: Uuid) -> StandardInterceptor {
+        StandardInterceptor { builder_uuid }
+    }
+}
+
+impl Interceptor for StandardInterceptor {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        let metadata = request.metadata_mut();
+
+        metadata.insert(
+            "x-builder-uuid",
+            self.builder_uuid.to_string().parse().unwrap(),
+        );
+
+        Ok(request)
+    }
+}
+
+async fn server_and_client_stub<Setup, SetupFuture, Run, RunFuture, A>(
+    builder_uuid: Uuid,
+    setup: Setup,
+    run: Run,
+) -> A
 where
     Setup: FnOnce(pubsub::PubSubService) -> SetupFuture,
     SetupFuture: Future<Output = ()> + Send + 'static,
-    Run: FnOnce(PubSubClient<Channel>) -> RunFuture,
+    Run: FnOnce(PubSubClient<InterceptedService<Channel, StandardInterceptor>>) -> RunFuture,
     RunFuture: Future<Output = A> + Send + 'static,
 {
     let shutdown = Arc::new(Notify::new());
@@ -146,7 +178,8 @@ where
                 .await
                 .unwrap();
 
-            let client = PubSubClient::new(channel);
+            let client =
+                PubSubClient::with_interceptor(channel, StandardInterceptor::new(builder_uuid));
 
             let run_future = run(client);
 
@@ -164,6 +197,8 @@ where
 // been seen (and is listing jobs).
 #[tokio::test]
 async fn end_to_end() {
+    let builder_uuid = Uuid::new_v4();
+
     let notify_submitted = Arc::new(Notify::new());
     let notify_listing = Arc::new(Notify::new());
 
@@ -184,6 +219,7 @@ async fn end_to_end() {
     };
 
     server_and_client_stub(
+        builder_uuid,
         {
             let eval_job_1 = eval_job_1.clone();
             let eval_job_2 = eval_job_2.clone();
@@ -197,18 +233,23 @@ async fn end_to_end() {
                 server.submit_eval_job(eval_job_2).await.unwrap();
             }
         },
-        async move |mut client: PubSubClient<Channel>| {
+        async move |mut client| {
             notify_submitted.notified().await;
 
-            let response = client
-                .list_jobs(Request::new(proto::server::ListJobsRequest {
+            client
+                .register(Request::new(proto::server::RegisterRequest {
                     builder_information: Some(proto::server::BuilderInformation {
-                        uuid: Some(Uuid::new_v4().into()),
+                        uuid: Some(builder_uuid.into()),
                         system: String::from("x86_64-linux"),
                         smt_core_count: 32,
                         total_memory: 32 * 1024 * 1024 * 1024,
                     }),
                 }))
+                .await
+                .unwrap();
+
+            let response = client
+                .list_jobs(Request::new(proto::server::ListJobsRequest {}))
                 .await
                 .unwrap();
 

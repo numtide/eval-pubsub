@@ -5,14 +5,23 @@ package pubsub.server;
 import "common.proto";
 
 service PubSub {
+  rpc Register(RegisterRequest) returns (RegisterResponse) {}
   rpc ListJobs(ListJobsRequest) returns (stream ListJobsResponse) {}
   rpc PickJob(PickJobRequest) returns (PickJobResponse) {}
   rpc ConcludeJob(ConcludeJobRequest) returns (ConcludeJobResponse) {}
   rpc JobOutput(JobOutputRequest) returns (JobOutputResponse) {}
 }
 
-message ListJobsRequest {
+message RegisterRequest {
   BuilderInformation builder_information = 1;
+}
+
+message RegisterResponse {
+
+}
+
+message ListJobsRequest {
+
 }
 
 message ListJobsResponse {

@@ -1,5 +1,3 @@
-use std::{io, ops::Deref};
-
 use diesel_async::pooled_connection::deadpool::PoolError;
 use thiserror::Error;
 
@@ -26,6 +24,10 @@ where
 pub enum ProtocolError {
     #[error("field {field:?} missing")]
     FieldMissing { field: Vec<String> },
+    #[error("metadata {metadata:?} missing")]
+    MetadataMissing { metadata: String },
+    #[error("metadata {metadata:?} invalid")]
+    MetadataInvalid { metadata: String },
 }
 
 impl ProtocolError {
@@ -39,6 +41,24 @@ impl ProtocolError {
                 .iter()
                 .map(|x| x.as_ref().to_owned())
                 .collect(),
+        }
+    }
+
+    pub fn metadata_missing<'a, S>(metadata: S) -> Self
+    where
+        S: AsRef<str>,
+    {
+        Self::MetadataMissing {
+            metadata: metadata.as_ref().to_owned(),
+        }
+    }
+
+    pub fn metadata_invalid<'a, S>(metadata: S) -> Self
+    where
+        S: AsRef<str>,
+    {
+        Self::MetadataInvalid {
+            metadata: metadata.as_ref().to_owned(),
         }
     }
 }
@@ -55,8 +75,10 @@ pub enum SubmitterError {
     JobPickedTwice { job_uuid: uuid::Uuid },
     #[error("database pool error {0}")]
     DatabasePool(#[from] PoolError),
-    #[error("database  error {0}")]
+    #[error("database error {0}")]
     Database(#[from] diesel::result::Error),
+    #[error("unregistered")]
+    Unregistered {},
     #[error("unknown error")]
     Unknown,
 }
@@ -78,13 +100,16 @@ impl From<SubmitterError> for tonic::Status {
                 tonic::Status::internal(pool_error.to_string())
             }
             SubmitterError::Database(error) => tonic::Status::internal(error.to_string()),
+            SubmitterError::Unregistered {} => {
+                tonic::Status::failed_precondition("must register first")
+            }
             SubmitterError::Unknown => tonic::Status::internal("unknown error"),
         }
     }
 }
 
 impl From<()> for SubmitterError {
-    fn from(value: ()) -> Self {
+    fn from(_value: ()) -> Self {
         SubmitterError::Unknown
     }
 }
@@ -93,6 +118,12 @@ impl From<ProtocolError> for tonic::Status {
     fn from(value: ProtocolError) -> Self {
         match &value {
             ProtocolError::FieldMissing { field: _ } => {
+                tonic::Status::invalid_argument(value.to_string())
+            }
+            ProtocolError::MetadataMissing { metadata: _ } => {
+                tonic::Status::invalid_argument(value.to_string())
+            }
+            ProtocolError::MetadataInvalid { metadata: _ } => {
                 tonic::Status::invalid_argument(value.to_string())
             }
         }
