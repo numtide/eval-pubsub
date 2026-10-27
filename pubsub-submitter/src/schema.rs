@@ -19,6 +19,7 @@ diesel::table! {
 diesel::table! {
     concluded_eval_job (id) {
         id -> Uuid,
+        builder_id -> Uuid,
     }
 }
 
@@ -53,12 +54,15 @@ diesel::table! {
 diesel::table! {
     picked_eval_job (id) {
         id -> Uuid,
+        builder_id -> Uuid,
     }
 }
 
+diesel::joinable!(concluded_eval_job -> builder (builder_id));
 diesel::joinable!(concluded_eval_job -> eval_job (id));
 diesel::joinable!(job_output -> eval_job (job_id));
 diesel::joinable!(pending_eval_job -> eval_job (id));
+diesel::joinable!(picked_eval_job -> builder (builder_id));
 diesel::joinable!(picked_eval_job -> eval_job (id));
 
 diesel::allow_tables_to_appear_in_same_query!(

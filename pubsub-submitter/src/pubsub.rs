@@ -105,7 +105,7 @@ impl PubSubService {
     }
 }
 
-fn get_uuid_from_request<T>(request: Request<T>) -> Result<Uuid, SubmitterError> {
+fn get_uuid_from_request<T>(request: &Request<T>) -> Result<Uuid, SubmitterError> {
     request
         .metadata()
         .get("x-builder-uuid")
@@ -173,7 +173,7 @@ impl PubSub for PubSubService {
         request: Request<proto::server::ListJobsRequest>,
     ) -> Result<Response<Self::ListJobsStream>, Status> {
         let mut conn = self.pg_pool.get().await.through()?;
-        let builder_uuid = get_uuid_from_request(request)?;
+        let builder_uuid = get_uuid_from_request(&request)?;
         self.check_registered(&mut conn, builder_uuid).await?;
 
         // TODO configurable?
@@ -258,14 +258,16 @@ impl PubSub for PubSubService {
         &self,
         request: Request<proto::server::PickJobRequest>,
     ) -> Result<Response<proto::server::PickJobResponse>, Status> {
+        let mut conn = self.pg_pool.get().await.through()?;
+        let builder_uuid = get_uuid_from_request(&request)?;
+        self.check_registered(&mut conn, builder_uuid).await?;
+
         let job_id = request
             .get_ref()
             .job_id
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
-
-        let mut conn = self.pg_pool.get().await.through()?;
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
             let pending_job: Option<models::PendingEvalJob> = diesel::delete(
                 pending_eval_job::dsl::pending_eval_job
@@ -278,7 +280,10 @@ impl PubSub for PubSubService {
             match pending_job {
                 Some(eval_job) => {
                     diesel::insert_into(picked_eval_job::dsl::picked_eval_job)
-                        .values(&vec![models::PickedEvalJob { id: eval_job.id }])
+                        .values(&vec![models::PickedEvalJob {
+                            id: eval_job.id,
+                            builder_id: builder_uuid,
+                        }])
                         .execute(&mut conn)
                         .await
                         .expect("Failed to insert row");
@@ -319,6 +324,10 @@ impl PubSub for PubSubService {
         &self,
         request: Request<proto::server::ConcludeJobRequest>,
     ) -> Result<Response<proto::server::ConcludeJobResponse>, Status> {
+        let mut conn = self.pg_pool.get().await.through()?;
+        let builder_uuid = get_uuid_from_request(&request)?;
+        self.check_registered(&mut conn, builder_uuid).await?;
+
         let job_id = request
             .get_ref()
             .job_id
@@ -326,7 +335,6 @@ impl PubSub for PubSubService {
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
 
-        let mut conn = self.pg_pool.get().await.through()?;
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
             let picked_job: Option<models::PickedEvalJob> = diesel::delete(
                 picked_eval_job::dsl::picked_eval_job.filter(picked_eval_job::dsl::id.eq(job_id)),
@@ -338,7 +346,10 @@ impl PubSub for PubSubService {
             match picked_job {
                 Some(eval_job) => {
                     diesel::insert_into(concluded_eval_job::dsl::concluded_eval_job)
-                        .values(&vec![models::ConcludedEvalJob { id: eval_job.id }])
+                        .values(&vec![models::ConcludedEvalJob {
+                            id: eval_job.id,
+                            builder_id: builder_uuid,
+                        }])
                         .execute(&mut conn)
                         .await
                         .expect("Failed to insert row");

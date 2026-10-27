@@ -54,6 +54,7 @@ pub struct PendingEvalJob {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct PickedEvalJob {
     pub id: Uuid,
+    pub builder_id: Uuid,
 }
 
 #[derive(Queryable, Selectable, Debug, Insertable)]
@@ -61,6 +62,7 @@ pub struct PickedEvalJob {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ConcludedEvalJob {
     pub id: Uuid,
+    pub builder_id: Uuid,
 }
 
 #[derive(Queryable, Selectable, Debug, Insertable)]
