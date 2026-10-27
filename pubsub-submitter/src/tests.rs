@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{str::FromStr as _, sync::Arc};
 
 use hyper_util::rt::TokioIo;
 use pubsub_proto::pubsub::{
@@ -7,8 +7,9 @@ use pubsub_proto::pubsub::{
 use tempfile::NamedTempFile;
 use tokio::{
     net::{UnixListener, UnixStream},
-    sync::{Notify, broadcast},
+    sync::Notify,
 };
+use tokio_postgres::{Config, NoTls};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{
     Request,
@@ -17,17 +18,96 @@ use tonic::{
 use tower::service_fn;
 use uuid::Uuid;
 
-use crate::pubsub;
+use crate::{postgres::config::ConfigString as _, pubsub};
 
-async fn server_and_client_stub<Callback, F>(
-    other: Callback,
-    shutdown: Arc<Notify>,
-) -> (impl Future<Output = ()>, PubSubClient<Channel>)
+async fn connect_with_changes<S, T, Change, Run>(database_url: S, change: Change, run: Run) -> T
 where
-    Callback: FnOnce(pubsub::PubSubService) -> F,
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
+    Change: AsyncFnOnce(&mut Config) -> (),
+    Run: AsyncFnOnce(&tokio_postgres::Client) -> T,
+    S: AsRef<str>,
 {
+    let mut connection_config = Config::from_str(database_url.as_ref()).unwrap();
+
+    change(&mut connection_config).await;
+
+    {
+        let shutdown = Arc::new(Notify::new());
+        let (client, connection) =
+            tokio_postgres::connect(&connection_config.to_key_value_string(), NoTls)
+                .await
+                .unwrap();
+
+        {
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = async move {
+                        if let Err(e) = connection.await {
+                            panic!("connection error: {}", e);
+                        }
+                    } => {}
+                    _ = shutdown.notified() => {}
+                }
+            });
+        }
+
+        let res = run(&client).await;
+
+        shutdown.notify_one();
+
+        res
+    }
+}
+
+async fn with_test_database<S, Fn, T>(database_url: S, cb: Fn) -> T
+where
+    S: AsRef<str>,
+    Fn: AsyncFnOnce(&str) -> T,
+{
+    let database_url = database_url.as_ref();
+    let db_uuid = Uuid::new_v4().to_string().replace('-', "_");
+    let dbname = format!("test_db_{}", db_uuid);
+
+    connect_with_changes(
+        database_url,
+        async |_config| {},
+        async |client| {
+            client
+                .simple_query(format!("CREATE DATABASE {}", dbname).as_str())
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+
+    let mut connection_string = Config::from_str(&database_url).unwrap();
+    connection_string.dbname(&dbname);
+
+    let ret = cb(&connection_string.to_key_value_string()).await;
+
+    connect_with_changes(
+        database_url,
+        async |_config| {},
+        async |client| {
+            client
+                .simple_query(format!("DROP DATABASE {}", dbname).as_str())
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+
+    ret
+}
+
+async fn server_and_client_stub<Setup, SetupFuture, Run, RunFuture, A>(setup: Setup, run: Run) -> A
+where
+    Setup: FnOnce(pubsub::PubSubService) -> SetupFuture,
+    SetupFuture: Future<Output = ()> + Send + 'static,
+    Run: FnOnce(PubSubClient<Channel>) -> RunFuture,
+    RunFuture: Future<Output = A> + Send + 'static,
+{
+    let shutdown = Arc::new(Notify::new());
     let socket = NamedTempFile::new().unwrap();
     let socket = Arc::new(socket.into_temp_path());
     std::fs::remove_file(&*socket).unwrap();
@@ -35,52 +115,48 @@ where
     let uds = UnixListener::bind(&*socket).unwrap();
     let stream = UnixListenerStream::new(uds);
 
-    let mut pubsub_service =
-        pubsub::PubSubService::new(std::env::var("DATABASE_URL").unwrap()).unwrap();
-    pubsub_service.clear_db().await;
-    pubsub_service.run_migrations().unwrap();
-    tokio::spawn(other(pubsub_service.clone()));
-    let serve_future = async move {
-        let result = Server::builder()
-            .add_service(PubSubServer::new(pubsub_service))
-            .serve_with_incoming_shutdown(stream, async { shutdown.notified().await })
-            .await;
-        // Server must be running fine...
-        assert!(result.is_ok());
-    };
+    with_test_database(
+        std::env::var("DATABASE_URL").unwrap(),
+        async |database_url| {
+            let mut pubsub_service = pubsub::PubSubService::new(database_url).unwrap();
+            pubsub_service.clear_db().await;
+            pubsub_service.run_migrations().unwrap();
+            tokio::spawn(setup(pubsub_service.clone()));
+            let serve_future = {
+                let shutdown = shutdown.clone();
+                async move {
+                    let result = Server::builder()
+                        .add_service(PubSubServer::new(pubsub_service))
+                        .serve_with_incoming_shutdown(stream, async { shutdown.notified().await })
+                        .await;
+                    // Server must be running fine...
+                    assert!(result.is_ok());
+                }
+            };
 
-    let socket = Arc::clone(&socket);
-    // Connect to the server over a Unix socket
-    // The URL will be ignored.
-    let channel = Endpoint::try_from("http://any.url")
-        .unwrap()
-        .connect_with_connector(service_fn(move |_: Uri| {
             let socket = Arc::clone(&socket);
-            async move { UnixStream::connect(&*socket).await.map(TokioIo::new) }
-        }))
-        .await
-        .unwrap();
+            // Connect to the server over a Unix socket
+            // The URL will be ignored.
+            let channel = Endpoint::try_from("http://any.url")
+                .unwrap()
+                .connect_with_connector(service_fn(move |_: Uri| {
+                    let socket = Arc::clone(&socket);
+                    async move { UnixStream::connect(&*socket).await.map(TokioIo::new) }
+                }))
+                .await
+                .unwrap();
 
-    let client = PubSubClient::new(channel);
+            let client = PubSubClient::new(channel);
 
-    (serve_future, client)
-}
+            let run_future = run(client);
 
-#[macro_export]
-macro_rules! pubsub_submitter_test {
-    ( $callback:expr, $client:expr ) => {
-        let shutdown = Arc::new(Notify::new());
-
-        let (serve_future, client) = server_and_client_stub($callback, shutdown.clone()).await;
-
-        let request_future = async { ($client)(client).await };
-
-        // Wait for completion, when the client request future completes
-        tokio::select! {
-            _ = serve_future => panic!("server returned first"),
-            _ = request_future => shutdown.notify_one(),
-        }
-    };
+            tokio::select! {
+                _ = serve_future => panic!("server returned first"),
+                res = run_future => { shutdown.notify_one(); res },
+            }
+        },
+    )
+    .await
 }
 
 // We do this somewhat complicated dance with Notify, to ensure that we test both the case
@@ -107,7 +183,7 @@ async fn end_to_end() {
         },
     };
 
-    pubsub_submitter_test!(
+    server_and_client_stub(
         {
             let eval_job_1 = eval_job_1.clone();
             let eval_job_2 = eval_job_2.clone();
@@ -121,7 +197,7 @@ async fn end_to_end() {
                 server.submit_eval_job(eval_job_2).await.unwrap();
             }
         },
-        async |mut client: PubSubClient<Channel>| {
+        async move |mut client: PubSubClient<Channel>| {
             notify_submitted.notified().await;
 
             let response = client
@@ -237,6 +313,7 @@ async fn end_to_end() {
                 }
                 Err(_) => panic!("received another error than \"not found\""),
             }
-        }
-    );
+        },
+    )
+    .await;
 }

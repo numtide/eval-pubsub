@@ -7,7 +7,7 @@ use tokio_postgres::{
     config::{ChannelBinding, Host, LoadBalanceHosts, SslMode, SslNegotiation, TargetSessionAttrs},
 };
 
-trait ConfigString {
+pub trait ConfigString {
     fn to_key_value(&self) -> Vec<(String, String)>;
     fn to_key_value_string(&self) -> String;
 }
