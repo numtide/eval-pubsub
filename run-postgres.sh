@@ -3,7 +3,8 @@ if ! [[ -d postgres ]] ; then
 fi
 podman run \
        --replace \
+       --detach \
        --volume "$FLAKE_ROOT/postgres:/run/postgresql" \
        --name pubsub-postgres \
        --env POSTGRES_PASSWORD=mysecretpassword \
-       postgres:18.6-alpine
+       docker.io/postgres:18.6-alpine
