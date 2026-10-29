@@ -8,6 +8,7 @@ use diesel_async::pooled_connection::deadpool::{Object, Pool};
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _};
 use diesel_migrations::MigrationHarness as _;
 use pubsub_proto::pubsub as proto;
+use pubsub_proto::pubsub::client::pub_sub_client_server::PubSubClient;
 use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
 
 use std::cell::OnceCell;
@@ -67,6 +68,29 @@ impl From<EvalJob> for proto::server::Job {
                     ),
                 },
             })),
+        }
+    }
+}
+
+impl TryFrom<proto::common::EvalJob> for EvalJob {
+    type Error = ProtocolError;
+
+    fn try_from(value: proto::common::EvalJob) -> Result<Self, Self::Error> {
+        match value.r#type {
+            Some(r#type) => {
+                let uuid = Uuid::new_v4();
+
+                Ok(EvalJob {
+                    job_id: uuid,
+                    r#type: match r#type {
+                        proto::common::eval_job::Type::Flake(flake) => EvalJobType::Flake {
+                            flake_ref: flake.flake_ref,
+                            attrs: flake.attr,
+                        },
+                    },
+                })
+            }
+            None => Err(ProtocolError::field_missing(&["type"])),
         }
     }
 }
@@ -398,6 +422,58 @@ impl PubSub for PubSubService {
         .map_err(Into::<SubmitterError>::into)?;
 
         Ok(Response::new(proto::server::JobOutputResponse {}))
+    }
+}
+
+#[tonic::async_trait]
+impl PubSubClient for PubSubService {
+    type TailJobStream = ReceiverStream<Result<proto::client::TailJobResponse, Status>>;
+
+    async fn submit_job(
+        &self,
+        request: Request<proto::client::SubmitJobRequest>,
+    ) -> Result<Response<proto::client::SubmitJobResponse>, Status> {
+        match &request.get_ref().r#type {
+            Some(proto::client::submit_job_request::Type::Eval(eval_job)) => {
+                let eval_job: EvalJob = eval_job.clone().try_into()?;
+                let uuid = eval_job.job_id.into();
+                self.submit_eval_job(eval_job).await?;
+
+                Ok(Response::new(proto::client::SubmitJobResponse {
+                    job_id: Some(uuid),
+                }))
+            }
+            Some(proto::client::submit_job_request::Type::Build(build_job)) => todo!(),
+            None => todo!(),
+        }
+    }
+
+    async fn tail_job(
+        &self,
+        request: Request<proto::client::TailJobRequest>,
+    ) -> Result<Response<Self::TailJobStream>, Status> {
+        Err(Status::unimplemented("todo"))
+    }
+
+    async fn wait_job(
+        &self,
+        request: Request<proto::client::WaitJobRequest>,
+    ) -> Result<Response<proto::client::WaitJobResponse>, Status> {
+        Err(Status::unimplemented("todo"))
+    }
+
+    async fn list_jobs(
+        &self,
+        request: Request<proto::client::ListJobsRequest>,
+    ) -> Result<Response<proto::client::ListJobsResponse>, Status> {
+        Err(Status::unimplemented("todo"))
+    }
+
+    async fn list_builders(
+        &self,
+        request: Request<proto::client::ListBuildersRequest>,
+    ) -> Result<Response<proto::client::ListBuildersResponse>, Status> {
+        Err(Status::unimplemented("todo"))
     }
 }
 

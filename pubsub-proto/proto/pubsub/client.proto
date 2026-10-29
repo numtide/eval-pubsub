@@ -8,6 +8,9 @@ service PubSubClient {
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse) {}
   rpc TailJob(TailJobRequest) returns (stream TailJobResponse) {}
   rpc WaitJob(WaitJobRequest) returns (WaitJobResponse) {}
+
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse) {}
+  rpc ListBuilders(ListBuildersRequest) returns (ListBuildersResponse) {}
 }
 
 message SubmitJobRequest {
@@ -35,4 +38,24 @@ message WaitJobRequest {
 
 message WaitJobResponse {
   common.JobStatus job_status = 2;
+}
+
+message ListJobsRequest {
+  int32 page = 1;
+  int32 count = 2;
+}
+
+message ListJobsResponse {
+  repeated common.EvalJob eval_jobs = 1;
+  int32 total = 2;
+}
+
+message ListBuildersRequest {
+  int32 page = 1;
+  int32 count = 2;
+}
+
+message ListBuildersResponse {
+  repeated common.BuilderInformation builders = 1;
+  int32 total = 2;
 }

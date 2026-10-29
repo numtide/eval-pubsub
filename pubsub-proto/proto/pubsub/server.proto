@@ -13,7 +13,7 @@ service PubSub {
 }
 
 message RegisterRequest {
-  BuilderInformation builder_information = 1;
+  common.BuilderInformation builder_information = 1;
 }
 
 message RegisterResponse {
@@ -62,13 +62,6 @@ message ConcludeJobRequest {
 
 message ConcludeJobResponse {
 
-}
-
-message BuilderInformation {
-  common.UUID uuid = 1;
-  string system = 2;
-  int32 smt_core_count = 3;
-  uint64 total_memory = 4;
 }
 
 message Job {
