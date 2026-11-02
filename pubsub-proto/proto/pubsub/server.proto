@@ -25,7 +25,7 @@ message ListJobsRequest {
 }
 
 message ListJobsResponse {
-  Job job = 2;
+  common.Job job = 2;
 }
 
 message JobOutputRequest {
@@ -62,12 +62,4 @@ message ConcludeJobRequest {
 
 message ConcludeJobResponse {
 
-}
-
-message Job {
-  common.UUID job_id = 1;
-  oneof type {
-    common.EvalJob eval = 2;
-    common.BuildJob build = 3;
-  }
 }

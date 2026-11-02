@@ -17,13 +17,25 @@ message EvalJob {
   }
 }
 
+message Job {
+  UUID job_id = 1;
+  AnonymousJob anonymous_job = 2;
+}
+
+message AnonymousJob {
+  oneof type {
+    EvalJob eval = 1;
+    BuildJob build = 2;
+  }
+}
+
 message UUID {
   fixed64 hi = 1;
   fixed64 lo = 2;
 }
 
 message BuilderInformation {
-  common.UUID uuid = 1;
+  UUID uuid = 1;
   string system = 2;
   int32 smt_core_count = 3;
   uint64 total_memory = 4;

@@ -1037,9 +1037,11 @@ dependencies = [
 name = "pubsub-submitter"
 version = "0.1.0"
 dependencies = [
+ "axum-core",
  "diesel",
  "diesel-async",
  "diesel_migrations",
+ "http",
  "hyper-util",
  "itertools 0.15.0",
  "pubsub-proto",

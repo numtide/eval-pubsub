@@ -21,3 +21,5 @@ tokio-stream = { version = "0.1.8", features = ["net"] }
 tower = { version = "0.4", features = ["util"] }
 hyper-util = "*"
 tempfile = "3.3.0"
+http = { version = "1.5" }
+axum-core = "0.5"

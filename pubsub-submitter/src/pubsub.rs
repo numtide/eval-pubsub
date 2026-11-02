@@ -54,20 +54,44 @@ impl Keyable for EvalJob {
     }
 }
 
-impl From<EvalJob> for proto::server::Job {
+impl From<EvalJob> for proto::common::Job {
     fn from(value: EvalJob) -> Self {
-        proto::server::Job {
+        proto::common::Job {
             job_id: Some(value.job_id.into()),
-            r#type: Some(proto::server::job::Type::Eval(proto::common::EvalJob {
-                r#type: match value.r#type {
-                    EvalJobType::Flake { flake_ref, attrs } => Some(
-                        proto::common::eval_job::Type::Flake(proto::common::eval_job::Flake {
-                            flake_ref,
-                            attr: attrs,
-                        }),
-                    ),
+            anonymous_job: Some(value.r#type.into()),
+        }
+    }
+}
+
+impl From<EvalJobType> for proto::common::AnonymousJob {
+    fn from(value: EvalJobType) -> Self {
+        proto::common::AnonymousJob {
+            r#type: Some(proto::common::anonymous_job::Type::Eval(
+                proto::common::EvalJob {
+                    r#type: Some(value.into()),
                 },
-            })),
+            )),
+        }
+    }
+}
+
+impl From<EvalJobType> for proto::common::EvalJob {
+    fn from(value: EvalJobType) -> Self {
+        proto::common::EvalJob {
+            r#type: Some(value.into()),
+        }
+    }
+}
+
+impl From<EvalJobType> for proto::common::eval_job::Type {
+    fn from(value: EvalJobType) -> Self {
+        match value {
+            EvalJobType::Flake { flake_ref, attrs } => {
+                proto::common::eval_job::Type::Flake(proto::common::eval_job::Flake {
+                    flake_ref,
+                    attr: attrs,
+                })
+            }
         }
     }
 }
