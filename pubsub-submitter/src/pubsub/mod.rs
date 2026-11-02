@@ -1,11 +1,12 @@
 use diesel::query_dsl::methods::{FilterDsl as _, SelectDsl as _};
-use diesel::sql_types::BigSerial;
+use diesel::sql_types::Text;
 use diesel::{ExpressionMethods as _, OptionalExtension as _, SelectableHelper as _, sql_query};
 use diesel_async::pooled_connection::deadpool::Object;
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _};
 use pubsub_proto::pubsub as proto;
 use pubsub_proto::pubsub::client::pub_sub_client_server::PubSubClient;
 use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
+use tokio_stream::StreamExt as _;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,16 +17,14 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use crate::error::{ProtocolError, SubmitterError};
+use crate::pubsub::job_output_notification::JobOutputNotification;
 use crate::queue::{self as queue, Keyable};
 use crate::schema::builder;
-use crate::schema::eval_job;
-use crate::schema::pending_eval_job;
-use crate::schema::picked_eval_job;
-use crate::schema::{concluded_eval_job, job_output};
 use crate::{error::ThroughProtocolError, models};
 use db_connector::DBConnector;
 
 mod db_connector;
+mod job_output_notification;
 
 #[derive(Debug, Clone)]
 pub enum EvalJobType {
@@ -367,7 +366,7 @@ impl PubSub for PubSubService {
         &self,
         request: Request<proto::server::JobOutputRequest>,
     ) -> Result<Response<proto::server::JobOutputResponse>, Status> {
-        let job_id: Uuid = request
+        let job_uuid: Uuid = request
             .get_ref()
             .job_id
             .as_ref()
@@ -377,17 +376,32 @@ impl PubSub for PubSubService {
 
         let mut conn = self.db_connector.get().await.through()?;
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
-            diesel::insert_into(job_output::dsl::job_output)
-                .values(
-                    output
-                        .into_iter()
-                        .map(|line| models::NewJobOutput { job_id, line })
-                        .collect::<Vec<_>>(),
-                )
-                .execute(&mut conn)
-                .await?;
+            let uuids = db_connector::insert_job_outputs(
+                &mut conn,
+                output
+                    .into_iter()
+                    .map(|line| models::NewJobOutput {
+                        job_id: job_uuid,
+                        line,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+            for job_output_id in uuids {
+                let job_output_notification = JobOutputNotification {
+                    job_uuid,
+                    job_output_id,
+                };
 
-            println!("got job {job_id} output:");
+                // https://markandruth.co.uk/2022/12/20/using-postgres-notify-with-placeholders
+                // thanks random person on the internet
+                sql_query("SELECT pg_notify('job_output', $1)")
+                    .bind::<Text, _>(serde_json::to_string(&job_output_notification)?)
+                    .execute(&mut conn)
+                    .await?;
+            }
+
+            println!("got job {job_uuid} output:");
             for line in output {
                 println!("  {line}");
             }
@@ -428,7 +442,73 @@ impl PubSubClient for PubSubService {
         &self,
         request: Request<proto::client::TailJobRequest>,
     ) -> Result<Response<Self::TailJobStream>, Status> {
-        Err(Status::unimplemented("todo"))
+        let mut conn = self.db_connector.get().await?;
+        let mut conn_notifs = self.db_connector.get().await?;
+        let job_id: Uuid = request
+            .get_ref()
+            .job_id
+            .as_ref()
+            .ok_or(ProtocolError::field_missing(&["job_id"]))?
+            .into();
+        sql_query("LISTEN job_output")
+            .execute(&mut conn_notifs)
+            .await
+            .map_err(Into::<SubmitterError>::into)?;
+
+        let (tx, rx) = mpsc::channel(1);
+
+        {
+            let shutdown_cell = self.shutdown_cell.clone();
+            let listen_future = async move {
+                println!("job tailed started for job {}", job_id);
+                let mut notifs = std::pin::pin!(conn_notifs.notifications_stream());
+
+                while let Some(notif) = notifs.next().await {
+                    let res: Result<_, _> = async {
+                        let notif = notif.map_err(Into::<SubmitterError>::into)?;
+                        println!("got notif");
+                        if notif.channel == "job_output" {
+                            match serde_json::from_str::<JobOutputNotification>(&notif.payload) {
+                                Ok(job_output_notification) => {
+                                    if job_output_notification.job_uuid == job_id {
+                                        if let Some(job_output) = db_connector::get_job_output(
+                                            &mut conn,
+                                            job_output_notification.job_output_id,
+                                        )
+                                        .await
+                                        .unwrap()
+                                        {
+                                            Ok(proto::client::TailJobResponse {
+                                                line: job_output.line,
+                                            })
+                                        } else {
+                                            todo!()
+                                        }
+                                    } else {
+                                        todo!()
+                                    }
+                                }
+                                Err(_) => todo!(),
+                            }
+                        } else {
+                            todo!()
+                        }
+                    }
+                    .await;
+
+                    tx.send(res).await.unwrap();
+                }
+            };
+
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = listen_future => {}
+                    _ = shutdown_cell.wait() => {}
+                }
+            })
+        };
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn wait_job(

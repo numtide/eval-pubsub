@@ -1,4 +1,4 @@
-use std::{str::FromStr as _, sync::Arc};
+use std::{str::FromStr as _, sync::Arc, time::Duration};
 
 use axum_core::response::IntoResponse;
 use core::convert::Infallible;
@@ -16,7 +16,7 @@ use tokio::{
     sync::Notify,
 };
 use tokio_postgres::{Config, NoTls};
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::{StreamExt as _, wrappers::UnixListenerStream};
 use tonic::{
     Request,
     body::Body,
@@ -413,21 +413,58 @@ async fn end_to_end() {
                         } => panic!("server didn't return a pick response"),
                     }
 
-                    client
-                        .job_output(Request::new(proto::server::JobOutputRequest {
-                            job_id: job_1.job_id,
-                            output: vec![
-                                "job 1 has been started",
-                                "churnining....",
-                                "almost done......",
-                                "done!",
-                            ]
-                            .into_iter()
-                            .map(ToOwned::to_owned)
-                            .collect(),
-                        }))
-                        .await
-                        .unwrap();
+                    tokio::join!(
+                        async {
+                            let tail_job_response = client_client
+                                .tail_job(Request::new(proto::client::TailJobRequest {
+                                    job_id: job_1.job_id,
+                                }))
+                                .await
+                                .unwrap();
+                            let job_output_stream = tail_job_response.into_inner();
+
+                            let job_output = job_output_stream
+                                .take(4)
+                                .collect::<Result<Vec<_>, _>>()
+                                .await
+                                .unwrap();
+
+                            assert_eq!(
+                                vec![
+                                    proto::client::TailJobResponse {
+                                        line: "job 1 has been started".to_owned()
+                                    },
+                                    proto::client::TailJobResponse {
+                                        line: "churnining....".to_owned()
+                                    },
+                                    proto::client::TailJobResponse {
+                                        line: "almost done......".to_owned()
+                                    },
+                                    proto::client::TailJobResponse {
+                                        line: "done!".to_owned()
+                                    }
+                                ],
+                                job_output
+                            );
+                        },
+                        async {
+                            client
+                                .job_output(Request::new(proto::server::JobOutputRequest {
+                                    job_id: job_1.job_id,
+                                    output: vec![
+                                        "job 1 has been started",
+                                        "churnining....",
+                                        "almost done......",
+                                        "done!",
+                                    ]
+                                    .into_iter()
+                                    .map(ToOwned::to_owned)
+                                    .collect(),
+                                }))
+                                .await
+                                .unwrap();
+                        }
+                    );
 
                     match client
                         .conclude_job(Request::new(proto::server::ConcludeJobRequest {

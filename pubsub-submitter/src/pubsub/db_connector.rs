@@ -215,6 +215,19 @@ where
         .map_err(Into::into)
 }
 
+pub async fn get_job_output(
+    conn: &mut Object<AsyncPgConnection>,
+    uuid: i64,
+) -> Result<Option<models::JobOutput>, SubmitterError> {
+    job_output::dsl::job_output
+        .filter(job_output::dsl::id.eq(uuid))
+        .select(models::JobOutput::as_select())
+        .first(conn)
+        .await
+        .optional()
+        .map_err(Into::into)
+}
+
 impl DBConnector {
     pub fn new<S>(database_url: S) -> Result<Self, Box<dyn std::error::Error>>
     where

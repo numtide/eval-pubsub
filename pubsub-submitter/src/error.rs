@@ -79,6 +79,8 @@ pub enum SubmitterError {
     Database(#[from] diesel::result::Error),
     #[error("unregistered")]
     Unregistered {},
+    #[error("serde error {0}")]
+    SerdeError(#[from] serde_json::error::Error),
     #[error("unknown error")]
     Unknown,
 }
@@ -104,6 +106,7 @@ impl From<SubmitterError> for tonic::Status {
                 tonic::Status::failed_precondition("must register first")
             }
             SubmitterError::Unknown => tonic::Status::internal("unknown error"),
+            SubmitterError::SerdeError(error) => tonic::Status::internal(error.to_string()),
         }
     }
 }
