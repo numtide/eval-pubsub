@@ -1,20 +1,15 @@
 use diesel::query_dsl::methods::{FilterDsl as _, SelectDsl as _};
-use diesel::{
-    Connection as _, ExpressionMethods as _, OptionalExtension as _, PgConnection,
-    SelectableHelper as _,
-};
-use diesel_async::pooled_connection::AsyncDieselConnectionManager;
-use diesel_async::pooled_connection::deadpool::{Object, Pool};
+use diesel::sql_types::BigSerial;
+use diesel::{ExpressionMethods as _, OptionalExtension as _, SelectableHelper as _, sql_query};
+use diesel_async::pooled_connection::deadpool::Object;
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _};
-use diesel_migrations::MigrationHarness as _;
 use pubsub_proto::pubsub as proto;
 use pubsub_proto::pubsub::client::pub_sub_client_server::PubSubClient;
 use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
 
-use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, SetOnce, mpsc};
+use tokio::sync::{Notify, RwLock, SetOnce, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -27,10 +22,10 @@ use crate::schema::eval_job;
 use crate::schema::pending_eval_job;
 use crate::schema::picked_eval_job;
 use crate::schema::{concluded_eval_job, job_output};
-use crate::{error::ThroughProtocolError, models, schema};
+use crate::{error::ThroughProtocolError, models};
+use db_connector::DBConnector;
 
-pub const MIGRATIONS: diesel_migrations::EmbeddedMigrations =
-    diesel_migrations::embed_migrations!("migrations");
+mod db_connector;
 
 #[derive(Debug, Clone)]
 pub enum EvalJobType {
@@ -126,9 +121,7 @@ struct BuilderTailer {
 
 #[derive(Clone)]
 pub struct PubSubService {
-    pg_pool: Pool<AsyncPgConnection>,
-    database_url: String,
-
+    db_connector: DBConnector,
     builder_states: Arc<RwLock<HashMap<Uuid, BuilderTailer>>>,
     shutdown_cell: Arc<SetOnce<()>>,
 }
@@ -177,6 +170,7 @@ impl PubSub for PubSubService {
         &self,
         request: Request<proto::server::RegisterRequest>,
     ) -> Result<Response<proto::server::RegisterResponse>, Status> {
+        let mut conn = self.db_connector.get().await?;
         let builder_information = request
             .get_ref()
             .builder_information
@@ -195,109 +189,85 @@ impl PubSub for PubSubService {
             builder_uuid, builder_information
         );
 
-        let mut conn = self.pg_pool.get().await.through()?;
-        conn.transaction::<_, SubmitterError, _>(async |mut conn| {
-            diesel::insert_into(builder::dsl::builder)
-                .values(&vec![models::Builder {
-                    id: builder_uuid,
-                    system: builder_information.system.clone(),
-                    smt_core_count: builder_information.smt_core_count,
-                    // TODO down sizing this value
-                    total_memory: builder_information.total_memory as i64,
-                    active: false,
-                }])
-                .execute(&mut conn)
-                .await
-                .expect("Failed to insert row");
+        db_connector::insert_builder(
+            &mut conn,
+            builder_uuid,
+            &builder_information.system,
+            builder_information.smt_core_count,
+            builder_information.total_memory,
+            false,
+        )
+        .await?;
 
-            Ok(Response::new(proto::server::RegisterResponse {}))
-        })
-        .await
-        .map_err(Into::into)
+        Ok(Response::new(proto::server::RegisterResponse {}))
     }
 
     async fn list_jobs(
         &self,
         request: Request<proto::server::ListJobsRequest>,
     ) -> Result<Response<Self::ListJobsStream>, Status> {
-        let mut conn = self.pg_pool.get().await.through()?;
+        let mut conn = self.db_connector.get().await.through()?;
         let builder_uuid = get_uuid_from_request(&request)?;
         self.check_registered(&mut conn, builder_uuid).await?;
+        let streaming = Arc::new(Notify::new());
 
         // TODO configurable?
-        let (sender, mut receiver) = queue::new(256);
+        let (sender, mut receiver) = queue::new::<EvalJob, Uuid>(256);
         let (tx, rx) = mpsc::channel(1);
 
-        let pending_eval_jobs: Vec<EvalJob> = eval_job::dsl::eval_job
-            .select(models::EvalJob::as_select())
-            .load(&mut conn)
-            .await
-            .through()?
-            .into_iter()
-            .map(TryInto::<EvalJob>::try_into)
-            .collect::<Result<Vec<EvalJob>, _>>()
-            .map_err(Into::<SubmitterError>::into)?;
+        db_connector::set_builder_active(&mut conn, builder_uuid, true).await?;
 
-        assert_eq!(
-            1,
-            diesel::update(builder::dsl::builder.filter(builder::dsl::id.eq(builder_uuid)))
-                .set(builder::dsl::active.eq(true))
-                .execute(&mut conn)
-                .await
-                .map_err(Into::<SubmitterError>::into)?
-        );
-
-        let shutdown_cell = self.shutdown_cell.clone();
-        // TODO still racy
-        self.builder_states.write().await.insert(
-            builder_uuid,
-            BuilderTailer {
-                sender,
-                task: tokio::spawn(async move {
-                    println!("background filter started");
-                    for eval_job in pending_eval_jobs {
-                        tx.send(Ok(proto::server::ListJobsResponse {
-                            job: Some(eval_job.clone().into()),
-                        }))
-                        .await
-                        .map_err(|_| SubmitterError::JobSend { builder_uuid })
-                        .unwrap();
-                    }
-
-                    tokio::select! {
-                        _ = async move {
-                          loop {
-                            match receiver.pop().await {
-                                Some(eval_job) => {
-                                    tx.send(Ok(proto::server::ListJobsResponse {
-                                        job: Some(eval_job.clone().into()),
-                                    }))
-                                    .await
-                                    .map_err(|_| SubmitterError::JobSend { builder_uuid })
-                                    .unwrap();
-                                }
-                                // no more jobs, shutting down
-                                None => {}
+        let task = {
+            let shutdown_cell = self.shutdown_cell.clone();
+            let mut conn = self.db_connector.get().await.through()?;
+            let tx = tx.clone();
+            let streaming = streaming.clone();
+            tokio::spawn(async move {
+                println!("background listener for builder {} started", builder_uuid);
+                tokio::select! {
+                    _ = async move {
+                      streaming.notify_one();
+                      loop {
+                        match receiver.pop().await {
+                            Some(eval_job) => {
+                                tx.send(Ok(proto::server::ListJobsResponse {
+                                    job: Some(eval_job.clone().into()),
+                                }))
+                                .await
+                                .map_err(|_| SubmitterError::JobSend { builder_uuid })
+                                .unwrap();
                             }
-                          }
-                        } => {},
-                        _ = shutdown_cell.wait() => {}
-                    };
+                            // no more jobs, shutting down
+                            None => {}
+                        }
+                      }
+                    } => {},
+                    _ = shutdown_cell.wait() => {}
+                };
 
-                    assert_eq!(
-                        1,
-                        diesel::update(
-                            builder::dsl::builder.filter(builder::dsl::id.eq(builder_uuid))
-                        )
-                        .set(builder::dsl::active.eq(false))
-                        .execute(&mut conn)
-                        .await
-                        .map_err(Into::<SubmitterError>::into)
-                        .expect("failed to update builder active state")
-                    );
-                }),
-            },
-        );
+                db_connector::set_builder_active(&mut conn, builder_uuid, false)
+                    .await
+                    .unwrap();
+            })
+        };
+
+        self.builder_states
+            .write()
+            .await
+            .insert(builder_uuid, BuilderTailer { sender, task });
+
+        streaming.notified().await;
+
+        let pending_eval_jobs = db_connector::get_pending_jobs(&mut conn).await?;
+
+        for eval_job in pending_eval_jobs {
+            tx.send(Ok(proto::server::ListJobsResponse {
+                job: Some(eval_job.clone().into()),
+            }))
+            .await
+            .map_err(|_| SubmitterError::JobSend { builder_uuid })
+            .unwrap();
+        }
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -306,7 +276,7 @@ impl PubSub for PubSubService {
         &self,
         request: Request<proto::server::PickJobRequest>,
     ) -> Result<Response<proto::server::PickJobResponse>, Status> {
-        let mut conn = self.pg_pool.get().await.through()?;
+        let mut conn = self.db_connector.get().await.through()?;
         let builder_uuid = get_uuid_from_request(&request)?;
         self.check_registered(&mut conn, builder_uuid).await?;
 
@@ -317,24 +287,18 @@ impl PubSub for PubSubService {
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
-            let pending_job: Option<models::PendingEvalJob> = diesel::delete(
-                pending_eval_job::dsl::pending_eval_job
-                    .filter(pending_eval_job::dsl::id.eq(job_id)),
-            )
-            .get_result::<models::PendingEvalJob>(&mut conn)
-            .await
-            .optional()?;
+            let pending_job = db_connector::take_pending_job(&mut conn, job_id).await?;
 
             match pending_job {
                 Some(eval_job) => {
-                    diesel::insert_into(picked_eval_job::dsl::picked_eval_job)
-                        .values(&vec![models::PickedEvalJob {
+                    db_connector::insert_picked_jobs(
+                        conn,
+                        &vec![models::PickedEvalJob {
                             id: eval_job.id,
                             builder_id: builder_uuid,
-                        }])
-                        .execute(&mut conn)
-                        .await
-                        .expect("Failed to insert row");
+                        }],
+                    )
+                    .await?;
 
                     Ok(Response::new(proto::server::PickJobResponse {
                         pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(
@@ -344,12 +308,7 @@ impl PubSub for PubSubService {
                 }
                 None => {
                     let eval_job: Option<models::PickedEvalJob> =
-                        picked_eval_job::dsl::picked_eval_job
-                            .filter(picked_eval_job::dsl::id.eq(job_id))
-                            .select(models::PickedEvalJob::as_select())
-                            .first(&mut conn)
-                            .await
-                            .optional()?;
+                        db_connector::get_picked_job(&mut conn, job_id).await?;
 
                     match eval_job {
                         Some(_) => Ok(Response::new(proto::server::PickJobResponse {
@@ -372,7 +331,7 @@ impl PubSub for PubSubService {
         &self,
         request: Request<proto::server::ConcludeJobRequest>,
     ) -> Result<Response<proto::server::ConcludeJobResponse>, Status> {
-        let mut conn = self.pg_pool.get().await.through()?;
+        let mut conn = self.db_connector.get().await.through()?;
         let builder_uuid = get_uuid_from_request(&request)?;
         self.check_registered(&mut conn, builder_uuid).await?;
 
@@ -384,23 +343,16 @@ impl PubSub for PubSubService {
             .into();
 
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
-            let picked_job: Option<models::PickedEvalJob> = diesel::delete(
-                picked_eval_job::dsl::picked_eval_job.filter(picked_eval_job::dsl::id.eq(job_id)),
-            )
-            .get_result::<models::PickedEvalJob>(&mut conn)
-            .await
-            .optional()?;
-
-            match picked_job {
+            match db_connector::take_picked_job(&mut conn, job_id).await? {
                 Some(eval_job) => {
-                    diesel::insert_into(concluded_eval_job::dsl::concluded_eval_job)
-                        .values(&vec![models::ConcludedEvalJob {
+                    db_connector::insert_concluded_jobs(
+                        &mut conn,
+                        &vec![models::ConcludedEvalJob {
                             id: eval_job.id,
                             builder_id: builder_uuid,
-                        }])
-                        .execute(&mut conn)
-                        .await
-                        .expect("Failed to insert row");
+                        }],
+                    )
+                    .await?;
 
                     Ok(Response::new(proto::server::ConcludeJobResponse {}))
                 }
@@ -423,7 +375,7 @@ impl PubSub for PubSubService {
             .into();
         let output: &Vec<String> = &request.get_ref().output;
 
-        let mut conn = self.pg_pool.get().await.through()?;
+        let mut conn = self.db_connector.get().await.through()?;
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
             diesel::insert_into(job_output::dsl::job_output)
                 .values(
@@ -515,14 +467,9 @@ impl PubSubService {
     where
         S: AsRef<str>,
     {
-        let config = AsyncDieselConnectionManager::<diesel_async::AsyncPgConnection>::new(
-            database_url.as_ref(),
-        );
-        let pool = Pool::builder(config).build()?;
         let pub_sub_service = PubSubService {
             builder_states: Arc::new(RwLock::new(HashMap::new())),
-            pg_pool: pool,
-            database_url: database_url.as_ref().to_owned(),
+            db_connector: DBConnector::new(database_url)?,
             shutdown_cell: Arc::new(SetOnce::new()),
         };
 
@@ -532,14 +479,11 @@ impl PubSubService {
     pub fn run_migrations(
         &mut self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
-        let mut conn = PgConnection::establish(&self.database_url)?;
-        conn.run_pending_migrations(MIGRATIONS)?;
-
-        Ok(())
+        self.db_connector.run_migrations()
     }
 
     pub async fn clear_db(&mut self) {
-        let mut conn = self.pg_pool.get().await.through().unwrap();
+        let mut conn = self.db_connector.get().await.through().unwrap();
 
         diesel::sql_query("DROP SCHEMA public CASCADE;")
             .execute(&mut conn)
@@ -553,21 +497,23 @@ impl PubSubService {
 
     pub async fn submit_eval_job(&self, eval_job: EvalJob) -> Result<(), SubmitterError> {
         println!("new job");
-        let mut conn = self.pg_pool.get().await.through()?;
+        let mut conn = self.db_connector.get().await.through()?;
         {
             let eval_job = eval_job.clone();
 
             conn.transaction::<_, SubmitterError, _>(async |mut conn| {
                 let job_id = eval_job.job_id;
-                diesel::insert_into(eval_job::dsl::eval_job)
-                    .values(&vec![Into::<models::EvalJob>::into(eval_job)])
-                    .execute(&mut conn)
-                    .await?;
+                db_connector::insert_eval_jobs(
+                    &mut conn,
+                    &vec![Into::<models::EvalJob>::into(eval_job)],
+                )
+                .await?;
 
-                diesel::insert_into(pending_eval_job::dsl::pending_eval_job)
-                    .values(&vec![models::PendingEvalJob { id: job_id }])
-                    .execute(&mut conn)
-                    .await?;
+                db_connector::insert_pending_jobs(
+                    &mut conn,
+                    &vec![models::PendingEvalJob { id: job_id }],
+                )
+                .await?;
 
                 Ok(())
             })
