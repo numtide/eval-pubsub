@@ -460,43 +460,50 @@ impl PubSubClient for PubSubService {
         {
             let shutdown_cell = self.shutdown_cell.clone();
             let listen_future = async move {
-                println!("job tailed started for job {}", job_id);
+                println!("job tailer started for job {}", job_id);
                 let mut notifs = std::pin::pin!(conn_notifs.notifications_stream());
 
                 while let Some(notif) = notifs.next().await {
-                    let res: Result<_, _> = async {
+                    let res: Result<Option<_>, _> = async {
                         let notif = notif.map_err(Into::<SubmitterError>::into)?;
-                        println!("got notif");
                         if notif.channel == "job_output" {
                             match serde_json::from_str::<JobOutputNotification>(&notif.payload) {
                                 Ok(job_output_notification) => {
                                     if job_output_notification.job_uuid == job_id {
-                                        if let Some(job_output) = db_connector::get_job_output(
+                                        match db_connector::get_job_output(
                                             &mut conn,
                                             job_output_notification.job_output_id,
                                         )
                                         .await
                                         .unwrap()
                                         {
-                                            Ok(proto::client::TailJobResponse {
-                                                line: job_output.line,
-                                            })
-                                        } else {
-                                            todo!()
+                                            Some(job_output) => {
+                                                Ok(Some(proto::client::TailJobResponse {
+                                                    line: job_output.line,
+                                                }))
+                                            }
+                                            None => Err(SubmitterError::JobOutputNotFound {
+                                                job_output_id: job_output_notification
+                                                    .job_output_id,
+                                            }
+                                            .into()),
                                         }
                                     } else {
-                                        todo!()
+                                        Ok(None)
                                     }
                                 }
-                                Err(_) => todo!(),
+                                Err(err) => Err(SubmitterError::SerdeError(err).into()),
                             }
                         } else {
-                            todo!()
+                            Ok(None)
                         }
                     }
                     .await;
 
-                    tx.send(res).await.unwrap();
+                    match res.transpose() {
+                        Some(res) => tx.send(res).await.unwrap(),
+                        None => {}
+                    }
                 }
             };
 
