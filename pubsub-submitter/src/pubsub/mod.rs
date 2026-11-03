@@ -17,12 +17,15 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use crate::error::{ProtocolError, SubmitterError};
+use crate::pubsub::concluded_job_notification::ConcludedJobNotification;
+use crate::pubsub::db_connector::DoContinue;
 use crate::pubsub::job_output_notification::JobOutputNotification;
 use crate::queue::{self as queue, Keyable};
 use crate::schema::builder;
 use crate::{error::ThroughProtocolError, models};
 use db_connector::DBConnector;
 
+mod concluded_job_notification;
 mod db_connector;
 mod job_output_notification;
 
@@ -161,6 +164,26 @@ fn get_uuid_from_request<T>(request: &Request<T>) -> Result<Uuid, SubmitterError
         .map_err(Into::into)
 }
 
+pub fn spawn_with_shutdown<F1, F2>(
+    shutdown: Arc<SetOnce<()>>,
+    future: F1,
+    finally: F2,
+) -> JoinHandle<F2::Output>
+where
+    F1: Future<Output = ()> + Send + 'static,
+    F2: Future + Send + 'static,
+    F2::Output: Send + 'static,
+{
+    tokio::spawn(async move {
+        tokio::select!(
+            _ = future => {},
+            _ = shutdown.wait() => {}
+        );
+
+        finally.await
+    })
+}
+
 #[tonic::async_trait]
 impl PubSub for PubSubService {
     type ListJobsStream = ReceiverStream<Result<proto::server::ListJobsResponse, Status>>;
@@ -221,12 +244,11 @@ impl PubSub for PubSubService {
             let mut conn = self.db_connector.get().await.through()?;
             let tx = tx.clone();
             let streaming = streaming.clone();
-            tokio::spawn(async move {
-                println!("background listener for builder {} started", builder_uuid);
-                tokio::select! {
-                    _ = async move {
-                      streaming.notify_one();
-                      loop {
+            spawn_with_shutdown(
+                shutdown_cell,
+                async move {
+                    streaming.notify_one();
+                    loop {
                         match receiver.pop().await {
                             Some(eval_job) => {
                                 tx.send(Ok(proto::server::ListJobsResponse {
@@ -239,15 +261,14 @@ impl PubSub for PubSubService {
                             // no more jobs, shutting down
                             None => {}
                         }
-                      }
-                    } => {},
-                    _ = shutdown_cell.wait() => {}
-                };
-
-                db_connector::set_builder_active(&mut conn, builder_uuid, false)
-                    .await
-                    .unwrap();
-            })
+                    }
+                },
+                async move {
+                    db_connector::set_builder_active(&mut conn, builder_uuid, false)
+                        .await
+                        .unwrap();
+                },
+            )
         };
 
         self.builder_states
@@ -352,6 +373,12 @@ impl PubSub for PubSubService {
                         }],
                     )
                     .await?;
+                    db_connector::notify(
+                        &mut conn,
+                        "concluded_job",
+                        ConcludedJobNotification::new(job_id).to_json()?,
+                    )
+                    .await?;
 
                     Ok(Response::new(proto::server::ConcludeJobResponse {}))
                 }
@@ -388,16 +415,10 @@ impl PubSub for PubSubService {
             )
             .await?;
             for job_output_id in uuids {
-                let job_output_notification = JobOutputNotification {
-                    job_uuid,
-                    job_output_id,
-                };
+                let job_output_notification = JobOutputNotification::new(job_uuid, job_output_id);
+                println!("notifying \"job_output\" for {}", job_output_id);
 
-                // https://markandruth.co.uk/2022/12/20/using-postgres-notify-with-placeholders
-                // thanks random person on the internet
-                sql_query("SELECT pg_notify('job_output', $1)")
-                    .bind::<Text, _>(serde_json::to_string(&job_output_notification)?)
-                    .execute(&mut conn)
+                db_connector::notify(&mut conn, "job_output", job_output_notification.to_json()?)
                     .await?;
             }
 
@@ -433,7 +454,7 @@ impl PubSubClient for PubSubService {
                     job_id: Some(uuid),
                 }))
             }
-            Some(proto::client::submit_job_request::Type::Build(build_job)) => todo!(),
+            Some(proto::client::submit_job_request::Type::Build(_build_job)) => todo!(),
             None => todo!(),
         }
     }
@@ -450,70 +471,56 @@ impl PubSubClient for PubSubService {
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
-        sql_query("LISTEN job_output")
-            .execute(&mut conn_notifs)
-            .await
-            .map_err(Into::<SubmitterError>::into)?;
 
         let (tx, rx) = mpsc::channel(1);
 
         {
             let shutdown_cell = self.shutdown_cell.clone();
-            let listen_future = async move {
-                println!("job tailer started for job {}", job_id);
-                let mut notifs = std::pin::pin!(conn_notifs.notifications_stream());
-
-                while let Some(notif) = notifs.next().await {
-                    let res: Result<Option<_>, _> = async {
-                        let notif = notif.map_err(Into::<SubmitterError>::into)?;
-                        if notif.channel == "job_output" {
-                            match serde_json::from_str::<JobOutputNotification>(&notif.payload) {
-                                Ok(job_output_notification) => {
-                                    if job_output_notification.job_uuid == job_id {
-                                        match db_connector::get_job_output(
-                                            &mut conn,
-                                            job_output_notification.job_output_id,
-                                        )
+            spawn_with_shutdown(
+                shutdown_cell,
+                async move {
+                    db_connector::listen(
+                        &mut conn_notifs,
+                        "job_output",
+                        async move |job_output_notification: JobOutputNotification| {
+                            if job_output_notification.job_uuid == job_id {
+                                match db_connector::get_job_output(
+                                    &mut conn,
+                                    job_output_notification.job_output_id,
+                                )
+                                .await
+                                .unwrap()
+                                {
+                                    Some(job_output) => {
+                                        println!("sending job output");
+                                        tx.send(Ok(proto::client::TailJobResponse {
+                                            line: job_output.line,
+                                        }))
                                         .await
-                                        .unwrap()
-                                        {
-                                            Some(job_output) => {
-                                                Ok(Some(proto::client::TailJobResponse {
-                                                    line: job_output.line,
-                                                }))
-                                            }
-                                            None => Err(SubmitterError::JobOutputNotFound {
-                                                job_output_id: job_output_notification
-                                                    .job_output_id,
-                                            }
-                                            .into()),
+                                        .unwrap();
+                                        println!("sent job output");
+                                    }
+                                    None => {
+                                        tx.send(Err(SubmitterError::JobOutputNotFound {
+                                            job_output_id: job_output_notification.job_output_id,
                                         }
-                                    } else {
-                                        Ok(None)
+                                        .into()))
+                                            .await
+                                            .unwrap();
                                     }
                                 }
-                                Err(err) => Err(SubmitterError::SerdeError(err).into()),
                             }
-                        } else {
-                            Ok(None)
-                        }
-                    }
-                    .await;
 
-                    match res.transpose() {
-                        Some(res) => tx.send(res).await.unwrap(),
-                        None => {}
-                    }
-                }
-            };
-
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = listen_future => {}
-                    _ = shutdown_cell.wait() => {}
-                }
-            })
-        };
+                            println!("getting next");
+                            DoContinue::Continue
+                        },
+                    )
+                    .await
+                    .unwrap()
+                },
+                async move {},
+            );
+        }
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -522,7 +529,43 @@ impl PubSubClient for PubSubService {
         &self,
         request: Request<proto::client::WaitJobRequest>,
     ) -> Result<Response<proto::client::WaitJobResponse>, Status> {
-        Err(Status::unimplemented("todo"))
+        let job_id: Uuid = request
+            .get_ref()
+            .job_id
+            .as_ref()
+            .ok_or(ProtocolError::field_missing(&["job_id"]))?
+            .into();
+        let result = Arc::new(SetOnce::new());
+        let mut conn_notifs = self.db_connector.get().await?;
+
+        {
+            let result = result.clone();
+            db_connector::listen(
+                &mut conn_notifs,
+                "concluded_job",
+                async move |concluded_job_notification: ConcludedJobNotification| {
+                    println!("job output notification: {:?}", concluded_job_notification);
+                    if concluded_job_notification.job_uuid == job_id {
+                        println!("matched");
+                        result
+                            .set(proto::client::WaitJobResponse {
+                                job_status: Some(proto::common::JobStatus {
+                                    result: Some(proto::common::job_status::Result::Success(
+                                        proto::common::job_status::Success {},
+                                    )),
+                                }),
+                            })
+                            .unwrap();
+                        DoContinue::Stop(Ok(()))
+                    } else {
+                        DoContinue::Continue
+                    }
+                },
+            )
+            .await?;
+        }
+
+        Ok(Response::new(*result.get().unwrap()))
     }
 
     async fn list_jobs(

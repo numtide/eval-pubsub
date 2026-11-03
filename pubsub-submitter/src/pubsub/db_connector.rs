@@ -5,6 +5,8 @@ use diesel::{
     pg::Pg,
     query_builder::{QueryFragment, QueryId},
     query_dsl::methods::{FilterDsl as _, SelectDsl as _},
+    sql_query,
+    sql_types::Text,
 };
 use diesel_async::{
     AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _,
@@ -15,6 +17,8 @@ use diesel_async::{
 };
 use diesel_migrations::MigrationHarness as _;
 use pubsub_proto::pubsub;
+use serde::Deserialize;
+use tokio_stream::StreamExt as _;
 use tonic::Response;
 use uuid::Uuid;
 
@@ -226,6 +230,70 @@ pub async fn get_job_output(
         .await
         .optional()
         .map_err(Into::into)
+}
+
+pub async fn notify<S1, S2>(
+    conn: &mut Object<AsyncPgConnection>,
+    channel: S1,
+    payload: S2,
+) -> Result<usize, SubmitterError>
+where
+    S1: AsRef<str>,
+    S2: AsRef<str>,
+{
+    // https://markandruth.co.uk/2022/12/20/using-postgres-notify-with-placeholders
+    // thanks random person on the internet
+    sql_query("SELECT pg_notify($1, $2)")
+        .bind::<Text, _>(channel.as_ref())
+        .bind::<Text, _>(payload.as_ref())
+        .execute(conn)
+        .await
+        .map_err(Into::into)
+}
+
+pub enum DoContinue<T> {
+    Continue,
+    Stop(T),
+}
+
+pub async fn listen<S, F, T>(
+    conn: &mut Object<AsyncPgConnection>,
+    channel: S,
+    mut callback: F,
+) -> Result<(), SubmitterError>
+where
+    S: AsRef<str>,
+    F: AsyncFnMut(T) -> DoContinue<Result<(), SubmitterError>>,
+    for<'a> T: Deserialize<'a>,
+{
+    // safe as long as "channel" is not externally controlled
+    // also proper substitutions dont seem to work with LISTEN and NOTIFY?
+    sql_query(format!("LISTEN {}", channel.as_ref()))
+        .execute(conn)
+        .await
+        .map_err(Into::<SubmitterError>::into)?;
+
+    let mut notifs = std::pin::pin!(conn.notifications_stream());
+
+    println!("listing to notifications on channel {}", channel.as_ref());
+
+    loop {
+        if let Some(notif) = notifs.next().await {
+            let notif = notif.map_err(Into::<SubmitterError>::into)?;
+            println!("got notification {:?}", notif);
+            if notif.channel == channel.as_ref() {
+                match serde_json::from_str::<T>(notif.payload.as_str()) {
+                    Ok(t) => match callback(t).await {
+                        DoContinue::Continue => {}
+                        DoContinue::Stop(res) => break res,
+                    },
+                    Err(err) => Err(SubmitterError::SerdeError(err))?,
+                };
+            }
+        } else {
+            break Ok(());
+        }
+    }
 }
 
 impl DBConnector {

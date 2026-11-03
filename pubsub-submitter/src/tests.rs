@@ -423,6 +423,7 @@ async fn end_to_end() {
                                 .unwrap();
                             let job_output_stream = tail_job_response.into_inner();
 
+                            println!("reading the stream");
                             let job_output = job_output_stream
                                 .take(4)
                                 .collect::<Result<Vec<_>, _>>()
@@ -448,6 +449,8 @@ async fn end_to_end() {
                             );
                         },
                         async {
+                            // TODO race condition?
+                            tokio::time::sleep(Duration::from_secs(4)).await;
                             client
                                 .job_output(Request::new(proto::server::JobOutputRequest {
                                     job_id: job_1.job_id,
@@ -466,16 +469,28 @@ async fn end_to_end() {
                         }
                     );
 
-                    match client
-                        .conclude_job(Request::new(proto::server::ConcludeJobRequest {
-                            job_id: job_1.job_id,
-                        }))
-                        .await
-                        .unwrap()
-                        .get_ref()
-                    {
-                        proto::server::ConcludeJobResponse {} => println!("concluded job!"),
-                    };
+                    tokio::join!(
+                        async {
+                            client_client
+                                .wait_job(Request::new(proto::client::WaitJobRequest {
+                                    job_id: job_1.job_id,
+                                }))
+                                .await
+                                .unwrap()
+                        },
+                        async {
+                            match client
+                                .conclude_job(Request::new(proto::server::ConcludeJobRequest {
+                                    job_id: job_1.job_id,
+                                }))
+                                .await
+                                .unwrap()
+                                .get_ref()
+                            {
+                                proto::server::ConcludeJobResponse {} => println!("concluded job!"),
+                            };
+                        }
+                    );
 
                     match client
                         .pick_job(Request::new(proto::server::PickJobRequest {
