@@ -1,4 +1,8 @@
-use std::{str::FromStr as _, sync::Arc, time::Duration};
+use std::{
+    str::FromStr as _,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use axum_core::response::IntoResponse;
 use core::convert::Infallible;
@@ -20,8 +24,6 @@ use tokio_stream::{StreamExt as _, wrappers::UnixListenerStream};
 use tonic::{
     Request,
     body::Body,
-    codegen::http::request::Request as RequestCodeGen,
-    metadata::MetadataValue,
     server::NamedService,
     service::{Interceptor, interceptor::InterceptedService},
     transport::{Channel, Endpoint, Server, Uri},
@@ -30,6 +32,7 @@ use tower::{Service, service_fn};
 use uuid::Uuid;
 
 use crate::{
+    models,
     postgres::config::ConfigString as _,
     pubsub::{self, PubSubService},
 };
@@ -151,11 +154,7 @@ trait StubGrpc {
     async fn wait_shutdown(&self, service: Self::Service) -> ();
 }
 
-async fn server_and_client_stub<G, Setup, SetupFuture, Run, RunFuture, A>(
-    stub_grpc: G,
-    setup: Setup,
-    run: Run,
-) -> A
+async fn server_and_client_stub<G, Run, RunFuture, A>(stub_grpc: G, run: Run) -> A
 where
     G: StubGrpc + Clone,
     G::Service: Clone + Send + Sync,
@@ -167,8 +166,6 @@ where
         + Service<http::Request<Body>, Error = Infallible>,
     <G::Server as Service<http::Request<Body>>>::Future: Send,
     <G::Server as Service<http::Request<Body>>>::Response: IntoResponse,
-    Setup: FnOnce(G::Service) -> SetupFuture,
-    SetupFuture: Future<Output = ()> + Send + 'static,
     Run: FnOnce(G::Service, G::Client) -> RunFuture,
     RunFuture: Future<Output = A> + Send + 'static,
 {
@@ -185,7 +182,6 @@ where
         async |database_url| {
             let service = stub_grpc.make_service(database_url).await;
 
-            tokio::spawn(setup(service.clone()));
             let serve_future = {
                 let shutdown = shutdown.clone();
                 let service = service.clone();
@@ -281,46 +277,73 @@ impl StubGrpc for ClientGrpcStub {
     async fn wait_shutdown(&self, service: Self::Service) -> () {}
 }
 
+const JOB_1: LazyLock<models::AnonymousJob> = LazyLock::new(|| {
+    models::AnonymousJob::new_eval_job_flake("github:numtide/flake-utils", ["evalJobs"])
+});
+const JOB_2: LazyLock<models::Job> =
+    LazyLock::new(|| models::Job::new_eval_job_flake("github:numtide/treefmt-nix", ["evalJobs"]));
+
+#[tokio::test]
+async fn concluded_jobs_arent_pending() {
+    let builder_uuid = Uuid::new_v4();
+    let job_1 = (*JOB_1).clone();
+
+    server_and_client_stub(
+        SubmitterGrpcStub { builder_uuid },
+        async move |service, mut client| {
+            server_and_client_stub(
+                ClientGrpcStub { service },
+                async move |_, mut client_client| {
+                    client_client
+                        .submit_job(Request::new(proto::client::SubmitJobRequest {
+                            job: Some((*JOB_1).clone().into()),
+                        }))
+                        .await
+                        .unwrap();
+
+                    let response = client_client
+                        .list_jobs(Request::new(proto::client::ListJobsRequest {
+                            page: 0,
+                            count: 100,
+                        }))
+                        .await
+                        .unwrap();
+
+                    let response = response.into_inner();
+                    assert_eq!(response.total, 1);
+                    assert_eq!(
+                        response
+                            .jobs
+                            .into_iter()
+                            .map(|j| j.anonymous_job)
+                            .collect::<Option<Vec<_>>>(),
+                        Some(vec![job_1.into()])
+                    );
+                },
+            )
+            .await;
+        },
+    )
+    .await;
+}
+
 // We do this somewhat complicated dance with Notify, to ensure that we test both the case
 // where a job is already pending when a builder is first seen and when a builder has already
 // been seen (and is listing jobs).
 #[tokio::test]
 async fn end_to_end() {
+    let job_2_source = (*JOB_2).clone();
+
     let builder_uuid = Uuid::new_v4();
-
-    let notify_submitted = Arc::new(Notify::new());
-
-    let eval_job_1 = pubsub::EvalJob {
-        job_id: Uuid::new_v4(),
-        r#type: pubsub::EvalJobType::Flake {
-            flake_ref: "github:numtide/flake-utils".into(),
-            attrs: ["evalJobs"].map(Into::into).into(),
-        },
-    };
-
-    let eval_job_2 = pubsub::EvalJobType::Flake {
-        flake_ref: "github:numtide/treefmt-nix".into(),
-        attrs: ["evalJobs"].map(Into::into).into(),
-    };
 
     server_and_client_stub(
         SubmitterGrpcStub { builder_uuid },
-        {
-            let eval_job_1 = eval_job_1.clone();
-            let notify_submitted = notify_submitted.clone();
-
-            async move |server| {
-                server.submit_eval_job(eval_job_1).await.unwrap();
-                notify_submitted.notify_one();
-            }
-        },
         async move |service, mut client| {
+            service.submit_job(job_2_source.clone()).await.unwrap();
+
             server_and_client_stub(
                 ClientGrpcStub { service },
-                async move |_service| {},
                 async move |_, mut client_client| {
-                    notify_submitted.notified().await;
-
                     client
                         .register(Request::new(proto::server::RegisterRequest {
                             builder_information: Some(proto::common::BuilderInformation {
@@ -340,9 +363,7 @@ async fn end_to_end() {
 
                     client_client
                         .submit_job(Request::new(proto::client::SubmitJobRequest {
-                            r#type: Some(proto::client::submit_job_request::Type::Eval(
-                                eval_job_2.clone().into(),
-                            )),
+                            job: Some((*JOB_1).clone().into()),
                         }))
                         .await
                         .unwrap();
@@ -354,16 +375,24 @@ async fn end_to_end() {
                         .await
                         .unwrap()
                         .expect("didn't return a ListJobsResponse");
-                    let job_1 = job.expect("didn't return a job 1");
-                    assert_eq!(job_1, eval_job_1.into());
+                    let job_2 = job.expect("didn't return a job 2");
+                    assert_eq!(
+                        TryInto::<models::Job>::try_into(job_2).unwrap(),
+                        job_2_source
+                    );
 
                     let proto::server::ListJobsResponse { job } = inbound_stream
                         .message()
                         .await
                         .unwrap()
                         .expect("didn't return a ListJobsResponse");
-                    let job_2 = job.expect("didn't return a job 2");
-                    assert_eq!(job_2.anonymous_job, Some(eval_job_2.into()));
+                    let job_1 = job.expect("didn't return a job 1");
+                    assert_eq!(
+                        job_1
+                            .anonymous_job
+                            .expect("didn't return job_1.anonymous_job"),
+                        (*JOB_1).clone().into()
+                    );
 
                     match client
                         .pick_job(Request::new(proto::server::PickJobRequest {
@@ -450,7 +479,7 @@ async fn end_to_end() {
                         },
                         async {
                             // TODO race condition?
-                            tokio::time::sleep(Duration::from_secs(4)).await;
+                            // tokio::time::sleep(Duration::from_secs(4)).await;
                             client
                                 .job_output(Request::new(proto::server::JobOutputRequest {
                                     job_id: job_1.job_id,

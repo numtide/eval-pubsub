@@ -1,10 +1,15 @@
 use diesel::{
-    AsChangeset, Connection as _, ExpressionMethods as _, Insertable, OptionalExtension as _,
-    PgConnection, SelectableHelper as _,
+    Connection as _,
+    ExpressionMethods as _,
+    Insertable,
+    OptionalExtension as _,
+    PgConnection,
+    SelectableHelper as _,
     insertable::CanInsertInSingleQuery,
     pg::Pg,
     query_builder::{QueryFragment, QueryId},
-    query_dsl::methods::{FilterDsl as _, SelectDsl as _},
+    query_dsl::QueryDsl as _,
+    // query_dsl::methods::{FilterDsl as _, LimitDsl as _, OffsetDsl, SelectDsl as _},
     sql_query,
     sql_types::Text,
 };
@@ -12,20 +17,17 @@ use diesel_async::{
     AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _,
     pooled_connection::{
         AsyncDieselConnectionManager,
-        deadpool::{Object, Pool, PoolError},
+        deadpool::{Object, Pool},
     },
 };
 use diesel_migrations::MigrationHarness as _;
-use pubsub_proto::pubsub;
-use serde::Deserialize;
 use tokio_stream::StreamExt as _;
-use tonic::Response;
 use uuid::Uuid;
 
 use crate::{
-    error::{SubmitterError, ThroughProtocolError as _},
+    db,
+    error::SubmitterError,
     models,
-    pubsub::EvalJob,
     schema::{
         builder, concluded_eval_job, eval_job, job_output, pending_eval_job, picked_eval_job,
     },
@@ -53,7 +55,7 @@ where
 {
     conn.transaction::<_, SubmitterError, _>(async |mut conn| {
         diesel::insert_into(builder::dsl::builder)
-            .values(&vec![models::Builder {
+            .values(&vec![db::models::Builder {
                 id: uuid,
                 system: system.as_ref().to_owned(),
                 smt_core_count,
@@ -88,33 +90,93 @@ pub async fn set_builder_active(
     Ok(())
 }
 
-pub async fn insert_eval_jobs<U>(
+pub async fn get_job(
     conn: &mut Object<AsyncPgConnection>,
-    eval_jobs: U,
+    uuid: Uuid,
+) -> Result<Option<models::Job>, SubmitterError> {
+    eval_job::dsl::eval_job
+        .filter(eval_job::dsl::id.eq(uuid))
+        .select(db::models::EvalJob::as_select())
+        .first(conn)
+        .await
+        .optional()
+        .map_err(Into::into)
+        .and_then(|eval_job| {
+            eval_job
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(Into::into)
+        })
+}
+
+pub async fn get_jobs(
+    conn: &mut Object<AsyncPgConnection>,
+) -> Result<Vec<models::Job>, SubmitterError> {
+    eval_job::dsl::eval_job
+        .select(db::models::EvalJob::as_select())
+        .load(conn)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+pub async fn get_eval_jobs_paginated(
+    conn: &mut Object<AsyncPgConnection>,
+    page: i64,
+    count: i64,
+) -> Result<(Vec<models::Job>, i64), SubmitterError> {
+    let eval_jobs = eval_job::dsl::eval_job
+        .select(db::models::EvalJob::as_select())
+        .limit(count)
+        .offset(page * count)
+        .load(conn)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<_>, _>>()?
+        .into();
+    let total = eval_job::dsl::eval_job
+        .select(diesel::dsl::count(eval_job::dsl::id))
+        .first(conn)
+        .await?;
+
+    Ok((eval_jobs, total))
+}
+
+pub async fn insert_jobs<I>(
+    conn: &mut Object<AsyncPgConnection>,
+    jobs: I,
 ) -> Result<usize, SubmitterError>
 where
-    U: Insertable<eval_job::table>,
-    <U as Insertable<eval_job::table>>::Values:
-        QueryId + Send + CanInsertInSingleQuery<Pg> + QueryFragment<Pg>,
+    I: IntoIterator<Item = models::Job>,
 {
     diesel::insert_into(eval_job::dsl::eval_job)
-        .values(eval_jobs)
+        .values(
+            jobs.into_iter()
+                .map(Into::<db::models::EvalJob>::into)
+                .collect::<Vec<_>>(),
+        )
         .execute(conn)
         .await
         .map_err(Into::into)
 }
 
-pub async fn insert_pending_jobs<U>(
+pub async fn insert_pending_jobs<I>(
     conn: &mut Object<AsyncPgConnection>,
-    pending_jobs: U,
+    pending_jobs: I,
 ) -> Result<usize, SubmitterError>
 where
-    U: Insertable<pending_eval_job::table>,
-    <U as Insertable<pending_eval_job::table>>::Values:
-        QueryId + Send + CanInsertInSingleQuery<Pg> + QueryFragment<Pg>,
+    I: IntoIterator<Item = Uuid>,
 {
     diesel::insert_into(pending_eval_job::dsl::pending_eval_job)
-        .values(pending_jobs)
+        .values(
+            pending_jobs
+                .into_iter()
+                .map(|uuid| db::models::PendingEvalJob { id: uuid })
+                .collect::<Vec<_>>(),
+        )
         .execute(conn)
         .await
         .map_err(Into::into)
@@ -122,41 +184,48 @@ where
 
 pub async fn get_pending_jobs(
     conn: &mut Object<AsyncPgConnection>,
-) -> Result<Vec<EvalJob>, SubmitterError> {
-    eval_job::dsl::eval_job
-        .select(models::EvalJob::as_select())
+) -> Result<Vec<models::Job>, SubmitterError> {
+    eval_job::table
+        .inner_join(pending_eval_job::table)
+        .select(db::models::EvalJob::as_select())
         .load(conn)
         .await?
         .into_iter()
-        .map(TryInto::<EvalJob>::try_into)
-        .collect::<Result<Vec<EvalJob>, _>>()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
 
 pub async fn take_pending_job(
     conn: &mut Object<AsyncPgConnection>,
     uuid: Uuid,
-) -> Result<Option<models::PendingEvalJob>, SubmitterError> {
+) -> Result<Option<db::models::PendingEvalJob>, SubmitterError> {
     diesel::delete(
         pending_eval_job::dsl::pending_eval_job.filter(pending_eval_job::dsl::id.eq(uuid)),
     )
-    .get_result::<models::PendingEvalJob>(conn)
+    .get_result::<db::models::PendingEvalJob>(conn)
     .await
     .optional()
     .map_err(Into::into)
 }
 
-pub async fn insert_picked_jobs<U>(
+pub async fn insert_picked_jobs<I>(
     conn: &mut Object<AsyncPgConnection>,
-    picked_jobs: U,
+    picked_jobs: I,
 ) -> Result<usize, SubmitterError>
 where
-    U: Insertable<picked_eval_job::table>,
-    <U as Insertable<picked_eval_job::table>>::Values:
-        QueryId + Send + CanInsertInSingleQuery<Pg> + QueryFragment<Pg>,
+    I: IntoIterator<Item = (Uuid, Uuid)>,
 {
     diesel::insert_into(picked_eval_job::dsl::picked_eval_job)
-        .values(picked_jobs)
+        .values(
+            picked_jobs
+                .into_iter()
+                .map(|(uuid, builder_uuid)| db::models::PickedEvalJob {
+                    id: uuid,
+                    builder_id: builder_uuid,
+                })
+                .collect::<Vec<_>>(),
+        )
         .execute(conn)
         .await
         .map_err(Into::into)
@@ -165,10 +234,10 @@ where
 pub async fn get_picked_job(
     conn: &mut Object<AsyncPgConnection>,
     uuid: Uuid,
-) -> Result<Option<models::PickedEvalJob>, SubmitterError> {
+) -> Result<Option<db::models::PickedEvalJob>, SubmitterError> {
     picked_eval_job::dsl::picked_eval_job
         .filter(picked_eval_job::dsl::id.eq(uuid))
-        .select(models::PickedEvalJob::as_select())
+        .select(db::models::PickedEvalJob::as_select())
         .first(conn)
         .await
         .optional()
@@ -178,9 +247,9 @@ pub async fn get_picked_job(
 pub async fn take_picked_job(
     conn: &mut Object<AsyncPgConnection>,
     uuid: Uuid,
-) -> Result<Option<models::PickedEvalJob>, SubmitterError> {
+) -> Result<Option<db::models::PickedEvalJob>, SubmitterError> {
     diesel::delete(picked_eval_job::dsl::picked_eval_job.filter(picked_eval_job::dsl::id.eq(uuid)))
-        .get_result::<models::PickedEvalJob>(conn)
+        .get_result::<db::models::PickedEvalJob>(conn)
         .await
         .optional()
         .map_err(Into::into)
@@ -222,30 +291,53 @@ where
 pub async fn get_job_output(
     conn: &mut Object<AsyncPgConnection>,
     uuid: i64,
-) -> Result<Option<models::JobOutput>, SubmitterError> {
+) -> Result<Option<db::models::JobOutput>, SubmitterError> {
     job_output::dsl::job_output
         .filter(job_output::dsl::id.eq(uuid))
-        .select(models::JobOutput::as_select())
+        .select(db::models::JobOutput::as_select())
         .first(conn)
         .await
         .optional()
         .map_err(Into::into)
 }
 
-pub async fn notify<S1, S2>(
+pub async fn get_builder(
     conn: &mut Object<AsyncPgConnection>,
-    channel: S1,
-    payload: S2,
+    uuid: Uuid,
+) -> Result<Option<db::models::Builder>, SubmitterError> {
+    builder::dsl::builder
+        .filter(builder::dsl::id.eq(uuid))
+        .select(db::models::Builder::as_select())
+        .first(conn)
+        .await
+        .optional()
+        .map_err(Into::into)
+}
+
+pub trait PgNotifiable {
+    fn channel() -> String;
+    fn to_json(&self) -> Result<String, serde_json::error::Error>;
+    fn from_json<S>(string: S) -> Result<Self, serde_json::error::Error>
+    where
+        S: AsRef<str>,
+        Self: Sized;
+}
+
+pub async fn notify<T>(
+    conn: &mut Object<AsyncPgConnection>,
+    payload: T,
 ) -> Result<usize, SubmitterError>
 where
-    S1: AsRef<str>,
-    S2: AsRef<str>,
+    T: PgNotifiable,
 {
+    let payload = payload.to_json()?;
+    let channel = T::channel();
+    println!("notify {} with {}", channel, payload);
     // https://markandruth.co.uk/2022/12/20/using-postgres-notify-with-placeholders
     // thanks random person on the internet
     sql_query("SELECT pg_notify($1, $2)")
-        .bind::<Text, _>(channel.as_ref())
-        .bind::<Text, _>(payload.as_ref())
+        .bind::<Text, _>(channel.as_str())
+        .bind::<Text, _>(payload)
         .execute(conn)
         .await
         .map_err(Into::into)
@@ -256,33 +348,31 @@ pub enum DoContinue<T> {
     Stop(T),
 }
 
-pub async fn listen<S, F, T>(
+pub async fn listen<F, T>(
     conn: &mut Object<AsyncPgConnection>,
-    channel: S,
     mut callback: F,
 ) -> Result<(), SubmitterError>
 where
-    S: AsRef<str>,
     F: AsyncFnMut(T) -> DoContinue<Result<(), SubmitterError>>,
-    for<'a> T: Deserialize<'a>,
+    T: PgNotifiable,
 {
     // safe as long as "channel" is not externally controlled
     // also proper substitutions dont seem to work with LISTEN and NOTIFY?
-    sql_query(format!("LISTEN {}", channel.as_ref()))
+    sql_query(format!("LISTEN {}", T::channel()))
         .execute(conn)
         .await
         .map_err(Into::<SubmitterError>::into)?;
 
     let mut notifs = std::pin::pin!(conn.notifications_stream());
 
-    println!("listing to notifications on channel {}", channel.as_ref());
+    println!("listing to notifications on channel {}", T::channel());
 
     loop {
         if let Some(notif) = notifs.next().await {
             let notif = notif.map_err(Into::<SubmitterError>::into)?;
             println!("got notification {:?}", notif);
-            if notif.channel == channel.as_ref() {
-                match serde_json::from_str::<T>(notif.payload.as_str()) {
+            if notif.channel == T::channel() {
+                match T::from_json(notif.payload) {
                     Ok(t) => match callback(t).await {
                         DoContinue::Continue => {}
                         DoContinue::Stop(res) => break res,

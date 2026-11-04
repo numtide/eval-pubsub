@@ -9,7 +9,7 @@ message BuildJob {
 message EvalJob {
   message Flake {
     string flake_ref = 1;
-    repeated string attr = 2;
+    repeated string attrs = 2;
   }
 
   oneof type {
@@ -17,16 +17,16 @@ message EvalJob {
   }
 }
 
-message Job {
-  UUID job_id = 1;
-  AnonymousJob anonymous_job = 2;
-}
-
 message AnonymousJob {
   oneof type {
     EvalJob eval = 1;
     BuildJob build = 2;
   }
+}
+
+message Job {
+  UUID job_id = 1;
+  AnonymousJob anonymous_job = 2;
 }
 
 message UUID {

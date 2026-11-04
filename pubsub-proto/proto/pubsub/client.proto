@@ -14,10 +14,7 @@ service PubSubClient {
 }
 
 message SubmitJobRequest {
-  oneof type {
-    common.EvalJob eval = 1;
-    common.BuildJob build = 2;
-  }
+  common.AnonymousJob job = 1;
 }
 
 message SubmitJobResponse {
@@ -40,13 +37,14 @@ message WaitJobResponse {
   common.JobStatus job_status = 2;
 }
 
+// TODO not how one does pagination, how does one do it?
 message ListJobsRequest {
   int32 page = 1;
   int32 count = 2;
 }
 
 message ListJobsResponse {
-  repeated common.EvalJob eval_jobs = 1;
+  repeated common.Job jobs = 1;
   int32 total = 2;
 }
 

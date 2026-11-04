@@ -1,131 +1,39 @@
 use diesel::query_dsl::methods::{FilterDsl as _, SelectDsl as _};
-use diesel::sql_types::Text;
-use diesel::{ExpressionMethods as _, OptionalExtension as _, SelectableHelper as _, sql_query};
+use diesel::{ExpressionMethods as _, OptionalExtension as _, SelectableHelper as _};
 use diesel_async::pooled_connection::deadpool::Object;
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _};
 use pubsub_proto::pubsub as proto;
 use pubsub_proto::pubsub::client::pub_sub_client_server::PubSubClient;
 use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
-use tokio_stream::StreamExt as _;
 
-use std::collections::HashMap;
+use std::panic;
 use std::sync::Arc;
-use tokio::sync::{Notify, RwLock, SetOnce, mpsc};
-use tokio::task::JoinHandle;
+use tokio::sync::{RwLock, SetOnce, mpsc};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use crate::db;
+use crate::error::ThroughProtocolError;
 use crate::error::{ProtocolError, SubmitterError};
+use crate::models;
 use crate::pubsub::concluded_job_notification::ConcludedJobNotification;
 use crate::pubsub::db_connector::DoContinue;
 use crate::pubsub::job_output_notification::JobOutputNotification;
-use crate::queue::{self as queue, Keyable};
+use crate::pubsub::pending_job_notification::PendingJobNotification;
 use crate::schema::builder;
-use crate::{error::ThroughProtocolError, models};
 use db_connector::DBConnector;
 
 mod concluded_job_notification;
 mod db_connector;
 mod job_output_notification;
-
-#[derive(Debug, Clone)]
-pub enum EvalJobType {
-    Flake {
-        flake_ref: String,
-        attrs: Vec<String>,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct EvalJob {
-    pub job_id: Uuid,
-    pub r#type: EvalJobType,
-}
-
-impl Keyable for EvalJob {
-    type Key = Uuid;
-
-    fn key(&self) -> Self::Key {
-        self.job_id
-    }
-}
-
-impl From<EvalJob> for proto::common::Job {
-    fn from(value: EvalJob) -> Self {
-        proto::common::Job {
-            job_id: Some(value.job_id.into()),
-            anonymous_job: Some(value.r#type.into()),
-        }
-    }
-}
-
-impl From<EvalJobType> for proto::common::AnonymousJob {
-    fn from(value: EvalJobType) -> Self {
-        proto::common::AnonymousJob {
-            r#type: Some(proto::common::anonymous_job::Type::Eval(
-                proto::common::EvalJob {
-                    r#type: Some(value.into()),
-                },
-            )),
-        }
-    }
-}
-
-impl From<EvalJobType> for proto::common::EvalJob {
-    fn from(value: EvalJobType) -> Self {
-        proto::common::EvalJob {
-            r#type: Some(value.into()),
-        }
-    }
-}
-
-impl From<EvalJobType> for proto::common::eval_job::Type {
-    fn from(value: EvalJobType) -> Self {
-        match value {
-            EvalJobType::Flake { flake_ref, attrs } => {
-                proto::common::eval_job::Type::Flake(proto::common::eval_job::Flake {
-                    flake_ref,
-                    attr: attrs,
-                })
-            }
-        }
-    }
-}
-
-impl TryFrom<proto::common::EvalJob> for EvalJob {
-    type Error = ProtocolError;
-
-    fn try_from(value: proto::common::EvalJob) -> Result<Self, Self::Error> {
-        match value.r#type {
-            Some(r#type) => {
-                let uuid = Uuid::new_v4();
-
-                Ok(EvalJob {
-                    job_id: uuid,
-                    r#type: match r#type {
-                        proto::common::eval_job::Type::Flake(flake) => EvalJobType::Flake {
-                            flake_ref: flake.flake_ref,
-                            attrs: flake.attr,
-                        },
-                    },
-                })
-            }
-            None => Err(ProtocolError::field_missing(&["type"])),
-        }
-    }
-}
-
-struct BuilderTailer {
-    sender: queue::Sender<EvalJob, Uuid>,
-    task: JoinHandle<()>,
-}
+mod pending_job_notification;
 
 #[derive(Clone)]
 pub struct PubSubService {
     db_connector: DBConnector,
-    builder_states: Arc<RwLock<HashMap<Uuid, BuilderTailer>>>,
-    shutdown_cell: Arc<SetOnce<()>>,
+    join_set: Arc<RwLock<JoinSet<()>>>,
 }
 
 impl PubSubService {
@@ -134,17 +42,24 @@ impl PubSubService {
         conn: &mut Object<AsyncPgConnection>,
         builder_uuid: Uuid,
     ) -> Result<(), SubmitterError> {
-        let builder: Option<models::Builder> = builder::dsl::builder
-            .filter(builder::dsl::id.eq(builder_uuid))
-            .select(models::Builder::as_select())
-            .first(conn)
-            .await
-            .optional()?;
-
-        match builder {
+        match db_connector::get_builder(conn, builder_uuid).await? {
             Some(_builder) => Ok(()),
             None => Err(SubmitterError::Unregistered {}),
         }
+    }
+
+    pub async fn spawn<F1, F2>(&self, future: F1, finally: F2) -> JoinHandle<F2::Output>
+    where
+        F1: Future<Output = ()> + Send + 'static,
+        F2: Future + Send + 'static,
+        F2::Output: Send + 'static,
+    {
+        let join_set = self.join_set.clone();
+        tokio::spawn(async move {
+            join_set.write().await.spawn(future);
+
+            finally.await
+        })
     }
 }
 
@@ -162,26 +77,6 @@ fn get_uuid_from_request<T>(request: &Request<T>) -> Result<Uuid, SubmitterError
             Uuid::parse_str(metadata_value).map_err(|_| ProtocolError::metadata_invalid("uuid"))
         })
         .map_err(Into::into)
-}
-
-pub fn spawn_with_shutdown<F1, F2>(
-    shutdown: Arc<SetOnce<()>>,
-    future: F1,
-    finally: F2,
-) -> JoinHandle<F2::Output>
-where
-    F1: Future<Output = ()> + Send + 'static,
-    F2: Future + Send + 'static,
-    F2::Output: Send + 'static,
-{
-    tokio::spawn(async move {
-        tokio::select!(
-            _ = future => {},
-            _ = shutdown.wait() => {}
-        );
-
-        finally.await
-    })
 }
 
 #[tonic::async_trait]
@@ -229,60 +124,55 @@ impl PubSub for PubSubService {
         request: Request<proto::server::ListJobsRequest>,
     ) -> Result<Response<Self::ListJobsStream>, Status> {
         let mut conn = self.db_connector.get().await.through()?;
+        let mut conn_listener = self.db_connector.get().await.through()?;
+        let mut conn_notifs = self.db_connector.get().await.through()?;
         let builder_uuid = get_uuid_from_request(&request)?;
         self.check_registered(&mut conn, builder_uuid).await?;
-        let streaming = Arc::new(Notify::new());
 
-        // TODO configurable?
-        let (sender, mut receiver) = queue::new::<EvalJob, Uuid>(256);
         let (tx, rx) = mpsc::channel(1);
 
         db_connector::set_builder_active(&mut conn, builder_uuid, true).await?;
 
-        let task = {
-            let shutdown_cell = self.shutdown_cell.clone();
-            let mut conn = self.db_connector.get().await.through()?;
+        {
             let tx = tx.clone();
-            let streaming = streaming.clone();
-            spawn_with_shutdown(
-                shutdown_cell,
+            self.spawn(
                 async move {
-                    streaming.notify_one();
-                    loop {
-                        match receiver.pop().await {
-                            Some(eval_job) => {
-                                tx.send(Ok(proto::server::ListJobsResponse {
-                                    job: Some(eval_job.clone().into()),
-                                }))
+                    db_connector::listen(
+                        &mut conn_notifs,
+                        async move |pending_job: PendingJobNotification| {
+                            match db_connector::get_job(&mut conn_listener, pending_job.job_uuid)
                                 .await
-                                .map_err(|_| SubmitterError::JobSend { builder_uuid })
-                                .unwrap();
+                            {
+                                Ok(Some(job)) => {
+                                    println!("sending new job {:?}", job);
+                                    tx.send(Ok(proto::server::ListJobsResponse {
+                                        job: Some(job.into()),
+                                    }))
+                                    .await
+                                    .map_err(|_| SubmitterError::JobSend { builder_uuid })
+                                    .unwrap();
+
+                                    DoContinue::Continue
+                                }
+                                Ok(None) => todo!(),
+                                Err(err) => DoContinue::Stop(Err(err)),
                             }
-                            // no more jobs, shutting down
-                            None => {}
-                        }
-                    }
+                        },
+                    )
+                    .await
+                    .unwrap();
                 },
-                async move {
-                    db_connector::set_builder_active(&mut conn, builder_uuid, false)
-                        .await
-                        .unwrap();
-                },
+                async move {},
             )
+            .await
         };
 
-        self.builder_states
-            .write()
-            .await
-            .insert(builder_uuid, BuilderTailer { sender, task });
+        let pending_jobs = db_connector::get_pending_jobs(&mut conn).await?;
 
-        streaming.notified().await;
-
-        let pending_eval_jobs = db_connector::get_pending_jobs(&mut conn).await?;
-
-        for eval_job in pending_eval_jobs {
+        for pending_job in pending_jobs {
+            println!("sending existing job {:?}", pending_job);
             tx.send(Ok(proto::server::ListJobsResponse {
-                job: Some(eval_job.clone().into()),
+                job: Some(pending_job.clone().into()),
             }))
             .await
             .map_err(|_| SubmitterError::JobSend { builder_uuid })
@@ -311,14 +201,7 @@ impl PubSub for PubSubService {
 
             match pending_job {
                 Some(eval_job) => {
-                    db_connector::insert_picked_jobs(
-                        conn,
-                        &vec![models::PickedEvalJob {
-                            id: eval_job.id,
-                            builder_id: builder_uuid,
-                        }],
-                    )
-                    .await?;
+                    db_connector::insert_picked_jobs(conn, [(eval_job.id, builder_uuid)]).await?;
 
                     Ok(Response::new(proto::server::PickJobResponse {
                         pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(
@@ -326,21 +209,14 @@ impl PubSub for PubSubService {
                         )),
                     }))
                 }
-                None => {
-                    let eval_job: Option<models::PickedEvalJob> =
-                        db_connector::get_picked_job(&mut conn, job_id).await?;
-
-                    match eval_job {
-                        Some(_) => Ok(Response::new(proto::server::PickJobResponse {
-                            pick_response: Some(
-                                proto::server::pick_job_response::PickResponse::Deny(
-                                    proto::server::pick_job_response::Deny {},
-                                ),
-                            ),
-                        })),
-                        None => Err(SubmitterError::JobNotFound { job_uuid: job_id }.into()),
-                    }
-                }
+                None => match db_connector::get_picked_job(&mut conn, job_id).await? {
+                    Some(_) => Ok(Response::new(proto::server::PickJobResponse {
+                        pick_response: Some(proto::server::pick_job_response::PickResponse::Deny(
+                            proto::server::pick_job_response::Deny {},
+                        )),
+                    })),
+                    None => Err(SubmitterError::JobNotFound { job_uuid: job_id }.into()),
+                },
             }
         })
         .await
@@ -367,18 +243,13 @@ impl PubSub for PubSubService {
                 Some(eval_job) => {
                     db_connector::insert_concluded_jobs(
                         &mut conn,
-                        &vec![models::ConcludedEvalJob {
+                        &vec![db::models::ConcludedEvalJob {
                             id: eval_job.id,
                             builder_id: builder_uuid,
                         }],
                     )
                     .await?;
-                    db_connector::notify(
-                        &mut conn,
-                        "concluded_job",
-                        ConcludedJobNotification::new(job_id).to_json()?,
-                    )
-                    .await?;
+                    db_connector::notify(&mut conn, ConcludedJobNotification::new(job_id)).await?;
 
                     Ok(Response::new(proto::server::ConcludeJobResponse {}))
                 }
@@ -407,7 +278,7 @@ impl PubSub for PubSubService {
                 &mut conn,
                 output
                     .into_iter()
-                    .map(|line| models::NewJobOutput {
+                    .map(|line| db::models::NewJobOutput {
                         job_id: job_uuid,
                         line,
                     })
@@ -418,8 +289,7 @@ impl PubSub for PubSubService {
                 let job_output_notification = JobOutputNotification::new(job_uuid, job_output_id);
                 println!("notifying \"job_output\" for {}", job_output_id);
 
-                db_connector::notify(&mut conn, "job_output", job_output_notification.to_json()?)
-                    .await?;
+                db_connector::notify(&mut conn, job_output_notification).await?;
             }
 
             println!("got job {job_uuid} output:");
@@ -444,19 +314,20 @@ impl PubSubClient for PubSubService {
         &self,
         request: Request<proto::client::SubmitJobRequest>,
     ) -> Result<Response<proto::client::SubmitJobResponse>, Status> {
-        match &request.get_ref().r#type {
-            Some(proto::client::submit_job_request::Type::Eval(eval_job)) => {
-                let eval_job: EvalJob = eval_job.clone().try_into()?;
-                let uuid = eval_job.job_id.into();
-                self.submit_eval_job(eval_job).await?;
+        let anonymous_job = request
+            .get_ref()
+            .job
+            .clone()
+            .ok_or(ProtocolError::field_missing(&["job"]))
+            .and_then(TryInto::<models::AnonymousJob>::try_into)?;
+        let job = models::Job::new(anonymous_job);
+        let job_id = job.job_id;
 
-                Ok(Response::new(proto::client::SubmitJobResponse {
-                    job_id: Some(uuid),
-                }))
-            }
-            Some(proto::client::submit_job_request::Type::Build(_build_job)) => todo!(),
-            None => todo!(),
-        }
+        self.submit_job(job).await?;
+
+        Ok(Response::new(proto::client::SubmitJobResponse {
+            job_id: Some(job_id.into()),
+        }))
     }
 
     async fn tail_job(
@@ -474,53 +345,49 @@ impl PubSubClient for PubSubService {
 
         let (tx, rx) = mpsc::channel(1);
 
-        {
-            let shutdown_cell = self.shutdown_cell.clone();
-            spawn_with_shutdown(
-                shutdown_cell,
-                async move {
-                    db_connector::listen(
-                        &mut conn_notifs,
-                        "job_output",
-                        async move |job_output_notification: JobOutputNotification| {
-                            if job_output_notification.job_uuid == job_id {
-                                match db_connector::get_job_output(
-                                    &mut conn,
-                                    job_output_notification.job_output_id,
-                                )
-                                .await
-                                .unwrap()
-                                {
-                                    Some(job_output) => {
-                                        println!("sending job output");
-                                        tx.send(Ok(proto::client::TailJobResponse {
-                                            line: job_output.line,
-                                        }))
+        self.spawn(
+            async move {
+                db_connector::listen(
+                    &mut conn_notifs,
+                    async move |job_output_notification: JobOutputNotification| {
+                        if job_output_notification.job_uuid == job_id {
+                            match db_connector::get_job_output(
+                                &mut conn,
+                                job_output_notification.job_output_id,
+                            )
+                            .await
+                            .unwrap()
+                            {
+                                Some(job_output) => {
+                                    println!("sending job output");
+                                    tx.send(Ok(proto::client::TailJobResponse {
+                                        line: job_output.line,
+                                    }))
+                                    .await
+                                    .unwrap();
+                                    println!("sent job output");
+                                }
+                                None => {
+                                    tx.send(Err(SubmitterError::JobOutputNotFound {
+                                        job_output_id: job_output_notification.job_output_id,
+                                    }
+                                    .into()))
                                         .await
                                         .unwrap();
-                                        println!("sent job output");
-                                    }
-                                    None => {
-                                        tx.send(Err(SubmitterError::JobOutputNotFound {
-                                            job_output_id: job_output_notification.job_output_id,
-                                        }
-                                        .into()))
-                                            .await
-                                            .unwrap();
-                                    }
                                 }
                             }
+                        }
 
-                            println!("getting next");
-                            DoContinue::Continue
-                        },
-                    )
-                    .await
-                    .unwrap()
-                },
-                async move {},
-            );
-        }
+                        println!("getting next");
+                        DoContinue::Continue
+                    },
+                )
+                .await
+                .unwrap()
+            },
+            async move {},
+        )
+        .await;
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -542,7 +409,6 @@ impl PubSubClient for PubSubService {
             let result = result.clone();
             db_connector::listen(
                 &mut conn_notifs,
-                "concluded_job",
                 async move |concluded_job_notification: ConcludedJobNotification| {
                     println!("job output notification: {:?}", concluded_job_notification);
                     if concluded_job_notification.job_uuid == job_id {
@@ -572,7 +438,19 @@ impl PubSubClient for PubSubService {
         &self,
         request: Request<proto::client::ListJobsRequest>,
     ) -> Result<Response<proto::client::ListJobsResponse>, Status> {
-        Err(Status::unimplemented("todo"))
+        let mut conn = self.db_connector.get().await?;
+        let page = request.get_ref().page;
+        let count = request.get_ref().count;
+
+        db_connector::get_eval_jobs_paginated(&mut conn, page as i64, count as i64)
+            .await
+            .map(|(jobs, total)| {
+                Response::new(proto::client::ListJobsResponse {
+                    jobs: jobs.into_iter().map(Into::into).collect(),
+                    total: total as i32,
+                })
+            })
+            .map_err(Into::into)
     }
 
     async fn list_builders(
@@ -585,11 +463,14 @@ impl PubSubClient for PubSubService {
 
 impl PubSubService {
     pub async fn wait_shutdown(self) {
-        println!("collecting builder tailers");
-        self.shutdown_cell.set(()).unwrap();
-        for (uuid, builder_tailer) in self.builder_states.write().await.drain() {
-            println!("tailer done {}", uuid);
-            builder_tailer.task.await.unwrap()
+        let mut join_set = self.join_set.write().await;
+        join_set.abort_all();
+        while let Some(res) = join_set.join_next().await {
+            match res {
+                Ok(_) => {}
+                Err(err) if err.is_cancelled() => {}
+                Err(err) => panic::resume_unwind(err.into_panic()),
+            };
         }
     }
 
@@ -598,9 +479,8 @@ impl PubSubService {
         S: AsRef<str>,
     {
         let pub_sub_service = PubSubService {
-            builder_states: Arc::new(RwLock::new(HashMap::new())),
+            join_set: Arc::new(RwLock::new(JoinSet::new())),
             db_connector: DBConnector::new(database_url)?,
-            shutdown_cell: Arc::new(SetOnce::new()),
         };
 
         Ok(pub_sub_service)
@@ -625,39 +505,25 @@ impl PubSubService {
             .unwrap();
     }
 
-    pub async fn submit_eval_job(&self, eval_job: EvalJob) -> Result<(), SubmitterError> {
+    pub async fn submit_job(&self, job: models::Job) -> Result<(), SubmitterError> {
         println!("new job");
         let mut conn = self.db_connector.get().await.through()?;
         {
-            let eval_job = eval_job.clone();
+            let job = job.clone();
 
             conn.transaction::<_, SubmitterError, _>(async |mut conn| {
-                let job_id = eval_job.job_id;
-                db_connector::insert_eval_jobs(
-                    &mut conn,
-                    &vec![Into::<models::EvalJob>::into(eval_job)],
-                )
-                .await?;
+                let job_uuid = job.job_id;
+                println!("submitting job {:?}", job);
+                db_connector::insert_jobs(&mut conn, [job]).await?;
 
-                db_connector::insert_pending_jobs(
-                    &mut conn,
-                    &vec![models::PendingEvalJob { id: job_id }],
-                )
-                .await?;
+                db_connector::insert_pending_jobs(&mut conn, [job_uuid]).await?;
+
+                db_connector::notify(&mut conn, PendingJobNotification::new(job_uuid)).await?;
 
                 Ok(())
             })
             .await
             .map_err(Into::<SubmitterError>::into)?;
-        }
-
-        for (builder_uuid, builder_tailer) in self.builder_states.write().await.iter_mut() {
-            match builder_tailer.sender.push(eval_job.clone()).await {
-                Some(_) => Err(SubmitterError::JobSend {
-                    builder_uuid: *builder_uuid,
-                }),
-                None => Ok(()),
-            }?
         }
 
         Ok(())
