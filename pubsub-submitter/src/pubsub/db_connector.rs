@@ -326,7 +326,7 @@ where
 {
     let payload = payload.to_json()?;
     let channel = T::channel();
-    println!("notify {} with {}", channel, payload);
+    log::debug!("pg_notify on channel {} with payload {}", channel, payload);
     // https://markandruth.co.uk/2022/12/20/using-postgres-notify-with-placeholders
     // thanks random person on the internet
     sql_query("SELECT pg_notify($1, $2)")
@@ -350,21 +350,21 @@ where
     F: AsyncFnMut(T) -> DoContinue<Result<(), SubmitterError>>,
     T: PgNotifiable,
 {
-    // safe as long as "channel" is not externally controlled
-    // also proper substitutions dont seem to work with LISTEN and NOTIFY?
-    sql_query(format!("LISTEN {}", T::channel()))
+    let channel = T::channel();
+    // safe because channel is essentially a constant
+    sql_query(format!("LISTEN {}", channel))
         .execute(conn)
         .await
         .map_err(Into::<SubmitterError>::into)?;
 
     let mut notifs = std::pin::pin!(conn.notifications_stream());
 
-    println!("listing to notifications on channel {}", T::channel());
+    log::debug!("pg_listen on channel {}", channel);
 
     loop {
         if let Some(notif) = notifs.next().await {
             let notif = notif.map_err(Into::<SubmitterError>::into)?;
-            println!("got notification {:?}", notif);
+            log::debug!("got notification {:?} on channel {}", notif, channel);
             if notif.channel == T::channel() {
                 match T::from_json(notif.payload) {
                     Ok(t) => match callback(t).await {

@@ -18,8 +18,8 @@ itertools = { version = "0.15" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sysinfo = "0.40"
-# log = "0.4"
-# pretty_env_logger = "0.5"
+log = "0.4"
+env_logger = "0.11"
 
 [dev-dependencies]
 tokio-stream = { version = "0.1.8", features = ["net"] }

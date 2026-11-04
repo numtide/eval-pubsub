@@ -277,6 +277,17 @@ impl StubGrpc for ClientGrpcStub {
     async fn wait_shutdown(&self, service: Self::Service) -> () {}
 }
 
+fn init_logger() {
+    let _ = env_logger::builder()
+        // Include all events in tests
+        .filter_level(log::LevelFilter::Info)
+        .filter_module("pubsub_submitter", log::LevelFilter::max())
+        // Ensure events are captured by `cargo test`
+        .is_test(true)
+        // Ignore errors initializing the logger if tests race to configure it
+        .try_init();
+}
+
 const JOB_1: LazyLock<models::AnonymousJob> = LazyLock::new(|| {
     models::AnonymousJob::new_eval_job_flake("github:numtide/flake-utils", ["evalJobs"])
 });
@@ -285,7 +296,7 @@ const JOB_2: LazyLock<models::Job> =
 
 #[tokio::test]
 async fn concluded_jobs_arent_pending() {
-    pretty_env_logger::init();
+    init_logger();
     let builder_uuid = Uuid::new_v4();
     let job_1 = (*JOB_1).clone();
 
@@ -333,7 +344,7 @@ async fn concluded_jobs_arent_pending() {
 // been seen (and is listing jobs).
 #[tokio::test]
 async fn end_to_end() {
-    pretty_env_logger::init();
+    init_logger();
     let job_2_source = (*JOB_2).clone();
     let builder_uuid = Uuid::new_v4();
 

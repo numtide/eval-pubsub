@@ -1,11 +1,11 @@
-use diesel::query_dsl::methods::{FilterDsl as _, SelectDsl as _};
-use diesel::{ExpressionMethods as _, OptionalExtension as _, SelectableHelper as _};
+#![allow(unstable_name_collisions)]
 use diesel_async::pooled_connection::deadpool::Object;
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _};
 use pubsub_proto::pubsub as proto;
 use pubsub_proto::pubsub::client::pub_sub_client_server::PubSubClient;
 use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
 
+use itertools::Itertools;
 use std::panic;
 use std::sync::Arc;
 use tokio::sync::{RwLock, SetOnce, mpsc};
@@ -22,7 +22,6 @@ use crate::pubsub::concluded_job_notification::ConcludedJobNotification;
 use crate::pubsub::db_connector::DoContinue;
 use crate::pubsub::job_output_notification::JobOutputNotification;
 use crate::pubsub::pending_job_notification::PendingJobNotification;
-use crate::schema::builder;
 use db_connector::DBConnector;
 
 mod concluded_job_notification;
@@ -48,16 +47,20 @@ impl PubSubService {
         }
     }
 
-    pub async fn spawn<F1, F2>(&self, future: F1, finally: F2) -> JoinHandle<F2::Output>
+    pub async fn spawn<S, F1, F2>(&self, name: S, future: F1, finally: F2) -> JoinHandle<F2::Output>
     where
+        S: AsRef<str>,
         F1: Future<Output = ()> + Send + 'static,
         F2: Future + Send + 'static,
         F2::Output: Send + 'static,
     {
+        let name = name.as_ref().to_owned();
+        log::trace!("spawning background task with name {}", name);
         let join_set = self.join_set.clone();
         tokio::spawn(async move {
             join_set.write().await.spawn(future);
 
+            log::trace!("background task with name {} exiting", name);
             finally.await
         })
     }
@@ -101,9 +104,10 @@ impl PubSub for PubSubService {
             ]))?
             .into();
 
-        println!(
+        log::debug!(
             "builder {} registered: {:?}",
-            builder_uuid, builder_information
+            builder_uuid,
+            builder_information
         );
 
         db_connector::insert_builders(
@@ -132,6 +136,7 @@ impl PubSub for PubSubService {
         {
             let tx = tx.clone();
             self.spawn(
+                "list_jobs",
                 async move {
                     db_connector::listen(
                         &mut conn_notifs,
@@ -140,7 +145,11 @@ impl PubSub for PubSubService {
                                 .await
                             {
                                 Ok(Some(job)) => {
-                                    println!("sending new job {:?}", job);
+                                    log::trace!(
+                                        "sending new {:?} to builder {}",
+                                        job,
+                                        builder_uuid
+                                    );
                                     tx.send(Ok(proto::server::ListJobsResponse {
                                         job: Some(job.into()),
                                     }))
@@ -166,7 +175,11 @@ impl PubSub for PubSubService {
         let pending_jobs = db_connector::get_pending_jobs(&mut conn).await?;
 
         for pending_job in pending_jobs {
-            println!("sending existing job {:?}", pending_job);
+            log::trace!(
+                "sending pending {:?} to builder {}",
+                pending_job,
+                builder_uuid
+            );
             tx.send(Ok(proto::server::ListJobsResponse {
                 job: Some(pending_job.clone().into()),
             }))
@@ -185,13 +198,15 @@ impl PubSub for PubSubService {
         let mut conn = self.db_connector.get().await.through()?;
         let builder_uuid = get_uuid_from_request(&request)?;
         self.check_registered(&mut conn, builder_uuid).await?;
-
         let job_id = request
             .get_ref()
             .job_id
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
+
+        log::info!("builder {} picking job with UUID {}", builder_uuid, job_id);
+
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
             let pending_job = db_connector::take_pending_job(&mut conn, job_id).await?;
 
@@ -230,13 +245,18 @@ impl PubSub for PubSubService {
         let mut conn = self.db_connector.get().await.through()?;
         let builder_uuid = get_uuid_from_request(&request)?;
         self.check_registered(&mut conn, builder_uuid).await?;
-
         let job_id = request
             .get_ref()
             .job_id
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
+
+        log::info!(
+            "builder {} concluding job with UUID {}",
+            builder_uuid,
+            job_id
+        );
 
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
             match db_connector::take_picked_job(&mut conn, job_id).await? {
@@ -287,16 +307,18 @@ impl PubSub for PubSubService {
             .await?;
             for job_output_id in uuids {
                 let job_output_notification = JobOutputNotification::new(job_uuid, job_output_id);
-                println!("notifying \"job_output\" for {}", job_output_id);
-
                 db_connector::notify(&mut conn, job_output_notification).await?;
             }
 
-            println!("got job {job_uuid} output:");
-            for line in output {
-                println!("  {line}");
-            }
-
+            log::info!(
+                "got output for job with UUID {}:\n{}",
+                job_uuid,
+                output
+                    .iter()
+                    .map(|line| format!("- {}", line))
+                    .intersperse("\n".to_owned())
+                    .collect::<String>()
+            );
             Ok(())
         })
         .await
@@ -323,6 +345,8 @@ impl PubSubClient for PubSubService {
         let job = models::Job::new(anonymous_job);
         let job_id = job.job_id;
 
+        log::info!("client submitted job {:?}", job);
+
         self.submit_job(job).await?;
 
         Ok(Response::new(proto::client::SubmitJobResponse {
@@ -336,7 +360,7 @@ impl PubSubClient for PubSubService {
     ) -> Result<Response<Self::TailJobStream>, Status> {
         let mut conn = self.db_connector.get().await?;
         let mut conn_notifs = self.db_connector.get().await?;
-        let job_id: Uuid = request
+        let job_uuid: Uuid = request
             .get_ref()
             .job_id
             .as_ref()
@@ -345,12 +369,15 @@ impl PubSubClient for PubSubService {
 
         let (tx, rx) = mpsc::channel(1);
 
+        log::info!("client tailing job with UUID {}", job_uuid);
+
         self.spawn(
+            "tail_job",
             async move {
                 db_connector::listen(
                     &mut conn_notifs,
                     async move |job_output_notification: JobOutputNotification| {
-                        if job_output_notification.job_uuid == job_id {
+                        if job_output_notification.job_uuid == job_uuid {
                             match db_connector::get_job_output(
                                 &mut conn,
                                 job_output_notification.job_output_id,
@@ -359,13 +386,16 @@ impl PubSubClient for PubSubService {
                             .unwrap()
                             {
                                 Some(job_output) => {
-                                    println!("sending job output");
+                                    log::trace!(
+                                        "sending job output {:?} for joib with UUID {}",
+                                        job_output,
+                                        job_uuid
+                                    );
                                     tx.send(Ok(proto::client::TailJobResponse {
                                         line: job_output.line,
                                     }))
                                     .await
                                     .unwrap();
-                                    println!("sent job output");
                                 }
                                 None => {
                                     tx.send(Err(SubmitterError::JobOutputNotFound {
@@ -378,7 +408,6 @@ impl PubSubClient for PubSubService {
                             }
                         }
 
-                        println!("getting next");
                         DoContinue::Continue
                     },
                 )
@@ -396,7 +425,7 @@ impl PubSubClient for PubSubService {
         &self,
         request: Request<proto::client::WaitJobRequest>,
     ) -> Result<Response<proto::client::WaitJobResponse>, Status> {
-        let job_id: Uuid = request
+        let job_uuid: Uuid = request
             .get_ref()
             .job_id
             .as_ref()
@@ -405,14 +434,14 @@ impl PubSubClient for PubSubService {
         let result = Arc::new(SetOnce::new());
         let mut conn_notifs = self.db_connector.get().await?;
 
+        log::info!("client waiting for job with UUID {}", job_uuid);
+
         {
             let result = result.clone();
             db_connector::listen(
                 &mut conn_notifs,
                 async move |concluded_job_notification: ConcludedJobNotification| {
-                    println!("job output notification: {:?}", concluded_job_notification);
-                    if concluded_job_notification.job_uuid == job_id {
-                        println!("matched");
+                    if concluded_job_notification.job_uuid == job_uuid {
                         result
                             .set(proto::client::WaitJobResponse {
                                 job_status: Some(proto::common::JobStatus {
@@ -442,6 +471,8 @@ impl PubSubClient for PubSubService {
         let page = request.get_ref().page;
         let count = request.get_ref().count;
 
+        log::info!("client listing all jobs");
+
         db_connector::get_eval_jobs_paginated(&mut conn, page as i64, count as i64)
             .await
             .map(|(jobs, total)| {
@@ -457,6 +488,8 @@ impl PubSubClient for PubSubService {
         &self,
         request: Request<proto::client::ListBuildersRequest>,
     ) -> Result<Response<proto::client::ListBuildersResponse>, Status> {
+        log::info!("client listing builders");
+
         Err(Status::unimplemented("todo"))
     }
 }
@@ -506,18 +539,16 @@ impl PubSubService {
     }
 
     pub async fn submit_job(&self, job: models::Job) -> Result<(), SubmitterError> {
-        println!("new job");
         let mut conn = self.db_connector.get().await.through()?;
         {
             let job = job.clone();
 
             conn.transaction::<_, SubmitterError, _>(async |mut conn| {
                 let job_uuid = job.job_id;
-                println!("submitting job {:?}", job);
+                log::debug!("submitting job {:?}", job);
+
                 db_connector::insert_jobs(&mut conn, [job]).await?;
-
                 db_connector::insert_pending_jobs(&mut conn, [job_uuid]).await?;
-
                 db_connector::notify(&mut conn, PendingJobNotification::new(job_uuid)).await?;
 
                 Ok(())
