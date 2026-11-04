@@ -1,8 +1,18 @@
-use std::{str::FromStr as _, sync::Arc};
+use std::{
+    str::FromStr as _,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
+use axum_core::response::IntoResponse;
+use core::convert::Infallible;
 use hyper_util::rt::TokioIo;
 use pubsub_proto::pubsub::{
-    self as proto, server::pub_sub_client::PubSubClient, server::pub_sub_server::PubSubServer,
+    self as proto,
+    client::{
+        pub_sub_client_client::PubSubClientClient, pub_sub_client_server::PubSubClientServer,
+    },
+    server::{pub_sub_client::PubSubClient, pub_sub_server::PubSubServer},
 };
 use tempfile::NamedTempFile;
 use tokio::{
@@ -10,17 +20,22 @@ use tokio::{
     sync::Notify,
 };
 use tokio_postgres::{Config, NoTls};
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::{StreamExt as _, wrappers::UnixListenerStream};
 use tonic::{
     Request,
-    metadata::MetadataValue,
+    body::Body,
+    server::NamedService,
     service::{Interceptor, interceptor::InterceptedService},
     transport::{Channel, Endpoint, Server, Uri},
 };
-use tower::service_fn;
+use tower::{Service, service_fn};
 use uuid::Uuid;
 
-use crate::{postgres::config::ConfigString as _, pubsub};
+use crate::{
+    models,
+    postgres::config::ConfigString as _,
+    pubsub::{self, PubSubService},
+};
 
 async fn connect_with_changes<S, T, Change, Run>(database_url: S, change: Change, run: Run) -> T
 where
@@ -128,15 +143,30 @@ impl Interceptor for StandardInterceptor {
     }
 }
 
-async fn server_and_client_stub<Setup, SetupFuture, Run, RunFuture, A>(
-    builder_uuid: Uuid,
-    setup: Setup,
-    run: Run,
-) -> A
+trait StubGrpc {
+    type Service;
+    type Server;
+    type Client;
+
+    async fn make_service(&self, database_url: &'_ str) -> Self::Service;
+    async fn make_server(&self, service: Self::Service) -> Self::Server;
+    async fn make_client(&self, channel: Channel) -> Self::Client;
+    async fn wait_shutdown(&self, service: Self::Service) -> ();
+}
+
+async fn server_and_client_stub<G, Run, RunFuture, A>(stub_grpc: G, run: Run) -> A
 where
-    Setup: FnOnce(pubsub::PubSubService) -> SetupFuture,
-    SetupFuture: Future<Output = ()> + Send + 'static,
-    Run: FnOnce(PubSubClient<InterceptedService<Channel, StandardInterceptor>>) -> RunFuture,
+    G: StubGrpc + Clone,
+    G::Service: Clone + Send + Sync,
+    G::Server: Send
+        + Sync
+        + Clone
+        + NamedService
+        + 'static
+        + Service<http::Request<Body>, Error = Infallible>,
+    <G::Server as Service<http::Request<Body>>>::Future: Send,
+    <G::Server as Service<http::Request<Body>>>::Response: IntoResponse,
+    Run: FnOnce(G::Service, G::Client) -> RunFuture,
     RunFuture: Future<Output = A> + Send + 'static,
 {
     let shutdown = Arc::new(Notify::new());
@@ -150,16 +180,15 @@ where
     with_test_database(
         std::env::var("DATABASE_URL").unwrap(),
         async |database_url| {
-            let mut pubsub_service = pubsub::PubSubService::new(database_url).unwrap();
-            pubsub_service.clear_db().await;
-            pubsub_service.run_migrations().unwrap();
-            tokio::spawn(setup(pubsub_service.clone()));
+            let service = stub_grpc.make_service(database_url).await;
+
             let serve_future = {
                 let shutdown = shutdown.clone();
-                let pubsub_service = pubsub_service.clone();
+                let service = service.clone();
+                let stub_grpc = stub_grpc.clone();
                 async move {
                     let result = Server::builder()
-                        .add_service(PubSubServer::new(pubsub_service))
+                        .add_service(stub_grpc.make_server(service).await)
                         .serve_with_incoming_shutdown(stream, async { shutdown.notified().await })
                         .await;
                     // Server must be running fine...
@@ -179,18 +208,135 @@ where
                 .await
                 .unwrap();
 
-            let client =
-                PubSubClient::with_interceptor(channel, StandardInterceptor::new(builder_uuid));
+            // let client =
+            //     PubSubClient::with_interceptor(channel, StandardInterceptor::new(builder_uuid));
 
-            let run_future = run(client);
+            let run_future = run(service.clone(), stub_grpc.make_client(channel).await);
 
             tokio::select! {
                 _ = serve_future => panic!("server returned first"),
-                res = run_future => { shutdown.notify_one(); pubsub_service.wait_shutdown().await; res },
+                res = run_future => { shutdown.notify_one(); stub_grpc.wait_shutdown(service).await; res },
             }
         },
     )
     .await
+}
+
+#[derive(Copy, Clone)]
+struct SubmitterGrpcStub {
+    builder_uuid: Uuid,
+}
+
+impl StubGrpc for SubmitterGrpcStub {
+    type Service = PubSubService;
+    type Server = PubSubServer<PubSubService>;
+    type Client = PubSubClient<InterceptedService<Channel, StandardInterceptor>>;
+
+    async fn make_service(&self, database_url: &'_ str) -> Self::Service {
+        let mut service = pubsub::PubSubService::new(database_url).await.unwrap();
+        service.clear_db().await;
+        service.run_migrations().unwrap();
+        service
+    }
+
+    async fn make_server(&self, service: Self::Service) -> Self::Server {
+        PubSubServer::new(service)
+    }
+
+    async fn make_client(&self, channel: Channel) -> Self::Client {
+        PubSubClient::with_interceptor(channel, StandardInterceptor::new(self.builder_uuid))
+    }
+
+    async fn wait_shutdown(&self, service: Self::Service) -> () {
+        service.wait_shutdown().await
+    }
+}
+
+#[derive(Clone)]
+struct ClientGrpcStub {
+    service: PubSubService,
+}
+
+impl StubGrpc for ClientGrpcStub {
+    type Service = PubSubService;
+    type Server = PubSubClientServer<PubSubService>;
+    type Client = PubSubClientClient<Channel>;
+
+    async fn make_service(&self, _database_url: &'_ str) -> Self::Service {
+        self.service.clone()
+    }
+
+    async fn make_server(&self, service: Self::Service) -> Self::Server {
+        PubSubClientServer::new(service)
+    }
+
+    async fn make_client(&self, channel: Channel) -> Self::Client {
+        PubSubClientClient::new(channel)
+    }
+
+    async fn wait_shutdown(&self, service: Self::Service) -> () {}
+}
+
+fn init_logger() {
+    let _ = env_logger::builder()
+        // Include all events in tests
+        .filter_level(log::LevelFilter::Info)
+        .filter_module("pubsub_submitter", log::LevelFilter::max())
+        // Ensure events are captured by `cargo test`
+        .is_test(true)
+        // Ignore errors initializing the logger if tests race to configure it
+        .try_init();
+}
+
+const JOB_1: LazyLock<models::AnonymousJob> = LazyLock::new(|| {
+    models::AnonymousJob::new_eval_job_flake("github:numtide/flake-utils", ["evalJobs"])
+});
+const JOB_2: LazyLock<models::Job> =
+    LazyLock::new(|| models::Job::new_eval_job_flake("github:numtide/treefmt-nix", ["evalJobs"]));
+
+#[tokio::test]
+async fn concluded_jobs_arent_pending() {
+    init_logger();
+    let builder_uuid = Uuid::new_v4();
+    let job_1 = (*JOB_1).clone();
+
+    server_and_client_stub(
+        SubmitterGrpcStub { builder_uuid },
+        async move |service, mut client| {
+            server_and_client_stub(
+                ClientGrpcStub { service },
+                async move |_, mut client_client| {
+                    client_client
+                        .submit_job(Request::new(proto::client::SubmitJobRequest {
+                            job: Some((*JOB_1).clone().into()),
+                        }))
+                        .await
+                        .unwrap();
+
+                    let response = client_client
+                        .list_jobs(Request::new(proto::client::ListJobsRequest {
+                            page: 0,
+                            count: 100,
+                        }))
+                        .await
+                        .unwrap();
+
+                    let response = response.into_inner();
+                    assert_eq!(response.total, 1);
+                    assert_eq!(
+                        response
+                            .jobs
+                            .into_iter()
+                            .map(|j| j.anonymous_job)
+                            .collect::<Option<Vec<_>>>(),
+                        Some(vec![job_1.into()])
+                    );
+                },
+            )
+            .await;
+        },
+    )
+    .await;
 }
 
 // We do this somewhat complicated dance with Notify, to ensure that we test both the case
@@ -198,163 +344,212 @@ where
 // been seen (and is listing jobs).
 #[tokio::test]
 async fn end_to_end() {
+    init_logger();
+    let job_2_source = (*JOB_2).clone();
     let builder_uuid = Uuid::new_v4();
 
-    let notify_submitted = Arc::new(Notify::new());
-    let notify_listing = Arc::new(Notify::new());
-
-    let eval_job_1 = pubsub::EvalJob {
-        job_id: Uuid::new_v4(),
-        r#type: pubsub::EvalJobType::Flake {
-            flake_ref: "github:numtide/flake-utils".into(),
-            attrs: ["evalJobs"].map(Into::into).into(),
-        },
-    };
-
-    let eval_job_2 = pubsub::EvalJob {
-        job_id: Uuid::new_v4(),
-        r#type: pubsub::EvalJobType::Flake {
-            flake_ref: "github:numtide/treefmt-nix".into(),
-            attrs: ["evalJobs"].map(Into::into).into(),
-        },
-    };
-
     server_and_client_stub(
-        builder_uuid,
-        {
-            let eval_job_1 = eval_job_1.clone();
-            let eval_job_2 = eval_job_2.clone();
-            let notify_submitted = notify_submitted.clone();
-            let notify_listing = notify_listing.clone();
+        SubmitterGrpcStub { builder_uuid },
+        async move |service, mut client| {
+            service.submit_job(job_2_source.clone()).await.unwrap();
 
-            async move |server| {
-                server.submit_eval_job(eval_job_1).await.unwrap();
-                notify_submitted.notify_one();
-                notify_listing.notified().await;
-                server.submit_eval_job(eval_job_2).await.unwrap();
-            }
-        },
-        async move |mut client| {
-            notify_submitted.notified().await;
+            server_and_client_stub(
+                ClientGrpcStub { service },
+                async move |_, mut client_client| {
+                    client
+                        .register(Request::new(proto::server::RegisterRequest {
+                            builder_information: Some(proto::common::BuilderInformation {
+                                uuid: Some(builder_uuid.into()),
+                                system: String::from("x86_64-linux"),
+                                smt_core_count: 32,
+                                total_memory: 32 * 1024 * 1024 * 1024,
+                            }),
+                        }))
+                        .await
+                        .unwrap();
 
-            client
-                .register(Request::new(proto::server::RegisterRequest {
-                    builder_information: Some(proto::server::BuilderInformation {
-                        uuid: Some(builder_uuid.into()),
-                        system: String::from("x86_64-linux"),
-                        smt_core_count: 32,
-                        total_memory: 32 * 1024 * 1024 * 1024,
-                    }),
-                }))
-                .await
-                .unwrap();
+                    let response = client
+                        .list_jobs(Request::new(proto::server::ListJobsRequest {}))
+                        .await
+                        .unwrap();
 
-            let response = client
-                .list_jobs(Request::new(proto::server::ListJobsRequest {}))
-                .await
-                .unwrap();
+                    client_client
+                        .submit_job(Request::new(proto::client::SubmitJobRequest {
+                            job: Some((*JOB_1).clone().into()),
+                        }))
+                        .await
+                        .unwrap();
 
-            notify_listing.notify_one();
+                    let mut inbound_stream = response.into_inner();
 
-            let mut inbound_stream = response.into_inner();
+                    let proto::server::ListJobsResponse { job } = inbound_stream
+                        .message()
+                        .await
+                        .unwrap()
+                        .expect("didn't return a ListJobsResponse");
+                    let job_2 = job.expect("didn't return a job 2");
+                    assert_eq!(
+                        TryInto::<models::Job>::try_into(job_2).unwrap(),
+                        job_2_source
+                    );
 
-            let proto::server::ListJobsResponse { job } = inbound_stream
-                .message()
-                .await
-                .unwrap()
-                .expect("didn't return a ListJobsResponse");
-            let job_1 = job.expect("didn't return a job 1");
-            assert_eq!(job_1, eval_job_1.into());
+                    let proto::server::ListJobsResponse { job } = inbound_stream
+                        .message()
+                        .await
+                        .unwrap()
+                        .expect("didn't return a ListJobsResponse");
+                    let job_1 = job.expect("didn't return a job 1");
+                    assert_eq!(
+                        job_1
+                            .anonymous_job
+                            .expect("didn't return job_1.anonymous_job"),
+                        (*JOB_1).clone().into()
+                    );
 
-            let proto::server::ListJobsResponse { job } = inbound_stream
-                .message()
-                .await
-                .unwrap()
-                .expect("didn't return a ListJobsResponse");
-            let job_2 = job.expect("didn't return a job 2");
-            assert_eq!(job_2, eval_job_2.into());
+                    match client
+                        .pick_job(Request::new(proto::server::PickJobRequest {
+                            job_id: job_1.job_id,
+                        }))
+                        .await
+                        .unwrap()
+                        .get_ref()
+                    {
+                        proto::server::PickJobResponse {
+                            pick_response:
+                                Some(proto::server::pick_job_response::PickResponse::Allow(_)),
+                        } => {
+                            println!("successfully picked a job")
+                        }
+                        proto::server::PickJobResponse {
+                            pick_response:
+                                Some(proto::server::pick_job_response::PickResponse::Deny(_)),
+                        } => {
+                            panic!("server denied the pick when an allow was expected")
+                        }
+                        proto::server::PickJobResponse {
+                            pick_response: None,
+                        } => panic!("server didn't return a pick response"),
+                    };
 
-            match client
-                .pick_job(Request::new(proto::server::PickJobRequest {
-                    job_id: job_1.job_id,
-                }))
-                .await
-                .unwrap()
-                .get_ref()
-            {
-                proto::server::PickJobResponse {
-                    pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(_)),
-                } => {
-                    println!("successfully picked a job")
-                }
-                proto::server::PickJobResponse {
-                    pick_response: Some(proto::server::pick_job_response::PickResponse::Deny(_)),
-                } => {
-                    panic!("server denied the pick when an allow was expected")
-                }
-                proto::server::PickJobResponse {
-                    pick_response: None,
-                } => panic!("server didn't return a pick response"),
-            };
+                    match client
+                        .pick_job(Request::new(proto::server::PickJobRequest {
+                            job_id: job_1.job_id,
+                        }))
+                        .await
+                        .unwrap()
+                        .get_ref()
+                    {
+                        proto::server::PickJobResponse {
+                            pick_response:
+                                Some(proto::server::pick_job_response::PickResponse::Allow(_)),
+                        } => panic!(
+                            "server allowed a pick when the job has been already picked by us"
+                        ),
+                        proto::server::PickJobResponse {
+                            pick_response:
+                                Some(proto::server::pick_job_response::PickResponse::Deny(_)),
+                        } => println!("successfully failed to double pick a job"),
+                        proto::server::PickJobResponse {
+                            pick_response: None,
+                        } => panic!("server didn't return a pick response"),
+                    }
 
-            match client
-                .pick_job(Request::new(proto::server::PickJobRequest {
-                    job_id: job_1.job_id,
-                }))
-                .await
-                .unwrap()
-                .get_ref()
-            {
-                proto::server::PickJobResponse {
-                    pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(_)),
-                } => panic!("server allowed a pick when the job has been already picked by us"),
-                proto::server::PickJobResponse {
-                    pick_response: Some(proto::server::pick_job_response::PickResponse::Deny(_)),
-                } => println!("successfully failed to double pick a job"),
-                proto::server::PickJobResponse {
-                    pick_response: None,
-                } => panic!("server didn't return a pick response"),
-            }
+                    tokio::join!(
+                        async {
+                            let tail_job_response = client_client
+                                .tail_job(Request::new(proto::client::TailJobRequest {
+                                    job_id: job_1.job_id,
+                                }))
+                                .await
+                                .unwrap();
+                            let job_output_stream = tail_job_response.into_inner();
 
-            client
-                .job_output(Request::new(proto::server::JobOutputRequest {
-                    job_id: job_1.job_id,
-                    output: vec![
-                        "job 1 has been started",
-                        "churnining....",
-                        "almost done......",
-                        "done!",
-                    ]
-                    .into_iter()
-                    .map(ToOwned::to_owned)
-                    .collect(),
-                }))
-                .await
-                .unwrap();
+                            println!("reading the stream");
+                            let job_output = job_output_stream
+                                .take(4)
+                                .collect::<Result<Vec<_>, _>>()
+                                .await
+                                .unwrap();
 
-            match client
-                .conclude_job(Request::new(proto::server::ConcludeJobRequest {
-                    job_id: job_1.job_id,
-                }))
-                .await
-                .unwrap()
-                .get_ref()
-            {
-                proto::server::ConcludeJobResponse {} => println!("concluded job!"),
-            };
+                            assert_eq!(
+                                vec![
+                                    proto::client::TailJobResponse {
+                                        line: "job 1 has been started".to_owned()
+                                    },
+                                    proto::client::TailJobResponse {
+                                        line: "churnining....".to_owned()
+                                    },
+                                    proto::client::TailJobResponse {
+                                        line: "almost done......".to_owned()
+                                    },
+                                    proto::client::TailJobResponse {
+                                        line: "done!".to_owned()
+                                    }
+                                ],
+                                job_output
+                            );
+                        },
+                        async {
+                            // TODO race condition?
+                            // tokio::time::sleep(Duration::from_secs(4)).await;
+                            client
+                                .job_output(Request::new(proto::server::JobOutputRequest {
+                                    job_id: job_1.job_id,
+                                    output: vec![
+                                        "job 1 has been started",
+                                        "churnining....",
+                                        "almost done......",
+                                        "done!",
+                                    ]
+                                    .into_iter()
+                                    .map(ToOwned::to_owned)
+                                    .collect(),
+                                }))
+                                .await
+                                .unwrap();
+                        }
+                    );
 
-            match client
-                .pick_job(Request::new(proto::server::PickJobRequest {
-                    job_id: job_1.job_id,
-                }))
-                .await
-            {
-                Ok(_) => panic!("received unexpected allow/deny for a known concluded job"),
-                Err(status) if status.code() == tonic::Code::NotFound => {
-                    println!("job was successfully reported as not found, since it's concluded")
-                }
-                Err(_) => panic!("received another error than \"not found\""),
-            }
+                    tokio::join!(
+                        async {
+                            client_client
+                                .wait_job(Request::new(proto::client::WaitJobRequest {
+                                    job_id: job_1.job_id,
+                                }))
+                                .await
+                                .unwrap()
+                        },
+                        async {
+                            match client
+                                .conclude_job(Request::new(proto::server::ConcludeJobRequest {
+                                    job_id: job_1.job_id,
+                                }))
+                                .await
+                                .unwrap()
+                                .get_ref()
+                            {
+                                proto::server::ConcludeJobResponse {} => println!("concluded job!"),
+                            };
+                        }
+                    );
+
+                    match client
+                        .pick_job(Request::new(proto::server::PickJobRequest {
+                            job_id: job_1.job_id,
+                        }))
+                        .await
+                    {
+                        Ok(_) => panic!("received unexpected allow/deny for a known concluded job"),
+                        Err(status) if status.code() == tonic::Code::NotFound => {
+                            println!(
+                                "job was successfully reported as not found, since it's concluded"
+                            )
+                        }
+                        Err(_) => panic!("received another error than \"not found\""),
+                    }
+                },
+            )
+            .await
         },
     )
     .await;

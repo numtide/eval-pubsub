@@ -71,6 +71,8 @@ pub enum SubmitterError {
     JobSend { builder_uuid: uuid::Uuid },
     #[error("job {job_uuid} not found")]
     JobNotFound { job_uuid: uuid::Uuid },
+    #[error("job output not found")]
+    JobOutputNotFound { job_output_id: i64 },
     #[error("job {job_uuid} was picked twice")]
     JobPickedTwice { job_uuid: uuid::Uuid },
     #[error("database pool error {0}")]
@@ -79,6 +81,10 @@ pub enum SubmitterError {
     Database(#[from] diesel::result::Error),
     #[error("unregistered")]
     Unregistered {},
+    #[error("serde error {0}")]
+    SerdeError(#[from] serde_json::error::Error),
+    #[error("sysinfo error {0}")]
+    SysinfoError(#[from] sysinfo::Error),
     #[error("unknown error")]
     Unknown,
 }
@@ -87,15 +93,9 @@ impl From<SubmitterError> for tonic::Status {
     fn from(value: SubmitterError) -> Self {
         match value {
             SubmitterError::Protocol(protocol_error) => protocol_error.into(),
-            SubmitterError::JobSend { builder_uuid: _ } => {
-                tonic::Status::internal(value.to_string())
-            }
-            SubmitterError::JobNotFound { job_uuid: _ } => {
-                tonic::Status::not_found(value.to_string())
-            }
-            SubmitterError::JobPickedTwice { job_uuid: _ } => {
-                tonic::Status::internal(value.to_string())
-            }
+            SubmitterError::JobSend { .. } => tonic::Status::internal(value.to_string()),
+            SubmitterError::JobNotFound { .. } => tonic::Status::not_found(value.to_string()),
+            SubmitterError::JobPickedTwice { .. } => tonic::Status::internal(value.to_string()),
             SubmitterError::DatabasePool(pool_error) => {
                 tonic::Status::internal(pool_error.to_string())
             }
@@ -104,6 +104,9 @@ impl From<SubmitterError> for tonic::Status {
                 tonic::Status::failed_precondition("must register first")
             }
             SubmitterError::Unknown => tonic::Status::internal("unknown error"),
+            SubmitterError::SerdeError(error) => tonic::Status::internal(error.to_string()),
+            SubmitterError::JobOutputNotFound { .. } => tonic::Status::internal(value.to_string()),
+            SubmitterError::SysinfoError(error) => tonic::Status::internal(error.to_string()),
         }
     }
 }

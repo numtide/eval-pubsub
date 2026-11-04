@@ -1,3 +1,4 @@
+pub mod db;
 pub mod error;
 pub mod models;
 pub mod postgres;
@@ -13,7 +14,7 @@ use tonic::transport::Server;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "[::1]:10000".parse().unwrap();
-    let svc = pubsub::PubSubService::new("")?;
+    let svc = pubsub::PubSubService::new("").await?;
 
     Server::builder()
         .add_service(PubSubServer::new(svc))

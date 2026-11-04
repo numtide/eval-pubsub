@@ -8,13 +8,13 @@ service PubSubClient {
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse) {}
   rpc TailJob(TailJobRequest) returns (stream TailJobResponse) {}
   rpc WaitJob(WaitJobRequest) returns (WaitJobResponse) {}
+
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse) {}
+  rpc ListBuilders(ListBuildersRequest) returns (ListBuildersResponse) {}
 }
 
 message SubmitJobRequest {
-  oneof type {
-    common.EvalJob eval = 1;
-    common.BuildJob build = 2;
-  }
+  common.AnonymousJob job = 1;
 }
 
 message SubmitJobResponse {
@@ -35,4 +35,25 @@ message WaitJobRequest {
 
 message WaitJobResponse {
   common.JobStatus job_status = 2;
+}
+
+// TODO not how one does pagination, how does one do it?
+message ListJobsRequest {
+  int32 page = 1;
+  int32 count = 2;
+}
+
+message ListJobsResponse {
+  repeated common.Job jobs = 1;
+  int32 total = 2;
+}
+
+message ListBuildersRequest {
+  int32 page = 1;
+  int32 count = 2;
+}
+
+message ListBuildersResponse {
+  repeated common.BuilderInformation builders = 1;
+  int32 total = 2;
 }

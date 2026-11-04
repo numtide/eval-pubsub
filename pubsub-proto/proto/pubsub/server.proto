@@ -13,7 +13,7 @@ service PubSub {
 }
 
 message RegisterRequest {
-  BuilderInformation builder_information = 1;
+  common.BuilderInformation builder_information = 1;
 }
 
 message RegisterResponse {
@@ -25,7 +25,7 @@ message ListJobsRequest {
 }
 
 message ListJobsResponse {
-  Job job = 2;
+  common.Job job = 2;
 }
 
 message JobOutputRequest {
@@ -62,19 +62,4 @@ message ConcludeJobRequest {
 
 message ConcludeJobResponse {
 
-}
-
-message BuilderInformation {
-  common.UUID uuid = 1;
-  string system = 2;
-  int32 smt_core_count = 3;
-  uint64 total_memory = 4;
-}
-
-message Job {
-  common.UUID job_id = 1;
-  oneof type {
-    common.EvalJob eval = 2;
-    common.BuildJob build = 3;
-  }
 }
