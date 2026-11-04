@@ -1,15 +1,10 @@
 use diesel::{
-    Connection as _,
-    ExpressionMethods as _,
-    Insertable,
-    OptionalExtension as _,
-    PgConnection,
+    Connection as _, ExpressionMethods as _, Insertable, OptionalExtension as _, PgConnection,
     SelectableHelper as _,
     insertable::CanInsertInSingleQuery,
     pg::Pg,
     query_builder::{QueryFragment, QueryId},
     query_dsl::QueryDsl as _,
-    // query_dsl::methods::{FilterDsl as _, LimitDsl as _, OffsetDsl, SelectDsl as _},
     sql_query,
     sql_types::Text,
 };
@@ -42,35 +37,25 @@ pub struct DBConnector {
     database_url: String,
 }
 
-pub async fn insert_builder<S>(
+pub async fn insert_builders<I>(
     conn: &mut Object<AsyncPgConnection>,
-    uuid: Uuid,
-    system: S,
-    smt_core_count: i32,
-    total_memory: u64,
-    active: bool,
+    builders: I,
 ) -> Result<(), SubmitterError>
 where
-    S: AsRef<str> + Send + Sync,
+    I: IntoIterator<Item = models::Builder>,
 {
-    conn.transaction::<_, SubmitterError, _>(async |mut conn| {
-        diesel::insert_into(builder::dsl::builder)
-            .values(&vec![db::models::Builder {
-                id: uuid,
-                system: system.as_ref().to_owned(),
-                smt_core_count,
-                // TODO down sizing this value
-                total_memory: total_memory as i64,
-                active,
-            }])
-            .execute(&mut conn)
-            .await
-            .expect("Failed to insert row");
+    diesel::insert_into(builder::dsl::builder)
+        .values(
+            builders
+                .into_iter()
+                .map(Into::<db::models::Builder>::into)
+                .collect::<Vec<_>>(),
+        )
+        .execute(conn)
+        .await
+        .expect("Failed to insert row");
 
-        Ok(())
-    })
-    .await
-    .map_err(Into::into)
+    Ok(())
 }
 
 pub async fn set_builder_active(
@@ -127,22 +112,25 @@ pub async fn get_eval_jobs_paginated(
     page: i64,
     count: i64,
 ) -> Result<(Vec<models::Job>, i64), SubmitterError> {
-    let eval_jobs = eval_job::dsl::eval_job
-        .select(db::models::EvalJob::as_select())
-        .limit(count)
-        .offset(page * count)
-        .load(conn)
-        .await?
-        .into_iter()
-        .map(TryInto::try_into)
-        .collect::<Result<Vec<_>, _>>()?
-        .into();
-    let total = eval_job::dsl::eval_job
-        .select(diesel::dsl::count(eval_job::dsl::id))
-        .first(conn)
-        .await?;
+    conn.transaction(async |mut conn| {
+        let eval_jobs = eval_job::dsl::eval_job
+            .select(db::models::EvalJob::as_select())
+            .limit(count)
+            .offset(page * count)
+            .load(&mut conn)
+            .await?
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, _>>()?
+            .into();
+        let total = eval_job::dsl::eval_job
+            .select(diesel::dsl::count(eval_job::dsl::id))
+            .first(&mut conn)
+            .await?;
 
-    Ok((eval_jobs, total))
+        Ok((eval_jobs, total))
+    })
+    .await
 }
 
 pub async fn insert_jobs<I>(
@@ -199,14 +187,21 @@ pub async fn get_pending_jobs(
 pub async fn take_pending_job(
     conn: &mut Object<AsyncPgConnection>,
     uuid: Uuid,
-) -> Result<Option<db::models::PendingEvalJob>, SubmitterError> {
-    diesel::delete(
-        pending_eval_job::dsl::pending_eval_job.filter(pending_eval_job::dsl::id.eq(uuid)),
-    )
-    .get_result::<db::models::PendingEvalJob>(conn)
+) -> Result<Option<models::Job>, SubmitterError> {
+    conn.transaction(async |conn| {
+        let pending_job = diesel::delete(
+            pending_eval_job::dsl::pending_eval_job.filter(pending_eval_job::dsl::id.eq(uuid)),
+        )
+        .get_result::<db::models::PendingEvalJob>(conn)
+        .await
+        .optional()?;
+
+        match pending_job {
+            Some(pending_job) => get_job(conn, pending_job.id).await,
+            None => Ok(None),
+        }
+    })
     .await
-    .optional()
-    .map_err(Into::into)
 }
 
 pub async fn insert_picked_jobs<I>(
@@ -214,16 +209,13 @@ pub async fn insert_picked_jobs<I>(
     picked_jobs: I,
 ) -> Result<usize, SubmitterError>
 where
-    I: IntoIterator<Item = (Uuid, Uuid)>,
+    I: IntoIterator<Item = models::PickedJob>,
 {
     diesel::insert_into(picked_eval_job::dsl::picked_eval_job)
         .values(
             picked_jobs
                 .into_iter()
-                .map(|(uuid, builder_uuid)| db::models::PickedEvalJob {
-                    id: uuid,
-                    builder_id: builder_uuid,
-                })
+                .map(|picked_job| Into::<db::models::PickedEvalJob>::into(picked_job))
                 .collect::<Vec<_>>(),
         )
         .execute(conn)
@@ -234,24 +226,26 @@ where
 pub async fn get_picked_job(
     conn: &mut Object<AsyncPgConnection>,
     uuid: Uuid,
-) -> Result<Option<db::models::PickedEvalJob>, SubmitterError> {
+) -> Result<Option<models::PickedJob>, SubmitterError> {
     picked_eval_job::dsl::picked_eval_job
         .filter(picked_eval_job::dsl::id.eq(uuid))
         .select(db::models::PickedEvalJob::as_select())
         .first(conn)
         .await
         .optional()
+        .map(|picked_job| picked_job.map(Into::into))
         .map_err(Into::into)
 }
 
 pub async fn take_picked_job(
     conn: &mut Object<AsyncPgConnection>,
     uuid: Uuid,
-) -> Result<Option<db::models::PickedEvalJob>, SubmitterError> {
+) -> Result<Option<models::PickedJob>, SubmitterError> {
     diesel::delete(picked_eval_job::dsl::picked_eval_job.filter(picked_eval_job::dsl::id.eq(uuid)))
         .get_result::<db::models::PickedEvalJob>(conn)
         .await
         .optional()
+        .map(|picked_job| picked_job.map(Into::into))
         .map_err(Into::into)
 }
 

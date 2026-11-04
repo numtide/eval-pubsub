@@ -60,6 +60,20 @@ pub struct PickedEvalJob {
     pub builder_id: Uuid,
 }
 
+impl From<models::PickedJob> for PickedEvalJob {
+    fn from(value: models::PickedJob) -> Self {
+        let models::PickedJob { id, builder_id } = value;
+        Self { id, builder_id }
+    }
+}
+
+impl From<PickedEvalJob> for models::PickedJob {
+    fn from(value: PickedEvalJob) -> Self {
+        let PickedEvalJob { id, builder_id } = value;
+        Self { id, builder_id }
+    }
+}
+
 #[derive(Queryable, Selectable, Debug, Insertable)]
 #[diesel(table_name = crate::schema::concluded_eval_job)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -151,4 +165,40 @@ pub struct Builder {
     // TODO this really ought to be u64 but that would need a postgresl extension
     pub total_memory: i64,
     pub active: bool,
+}
+
+impl From<Builder> for models::Builder {
+    fn from(value: Builder) -> Self {
+        let Builder {
+            system,
+            smt_core_count,
+            active,
+            ..
+        } = value;
+        Self {
+            uuid: value.id,
+            system,
+            smt_core_count,
+            total_memory: value.total_memory as u64,
+            active,
+        }
+    }
+}
+
+impl From<models::Builder> for Builder {
+    fn from(value: models::Builder) -> Self {
+        let models::Builder {
+            system,
+            smt_core_count,
+            active,
+            ..
+        } = value;
+        Self {
+            id: value.uuid,
+            system,
+            smt_core_count,
+            total_memory: value.total_memory as i64,
+            active,
+        }
+    }
 }

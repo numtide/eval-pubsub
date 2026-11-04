@@ -285,6 +285,7 @@ const JOB_2: LazyLock<models::Job> =
 
 #[tokio::test]
 async fn concluded_jobs_arent_pending() {
+    pretty_env_logger::init();
     let builder_uuid = Uuid::new_v4();
     let job_1 = (*JOB_1).clone();
 
@@ -332,8 +333,8 @@ async fn concluded_jobs_arent_pending() {
 // been seen (and is listing jobs).
 #[tokio::test]
 async fn end_to_end() {
+    pretty_env_logger::init();
     let job_2_source = (*JOB_2).clone();
-
     let builder_uuid = Uuid::new_v4();
 
     server_and_client_stub(

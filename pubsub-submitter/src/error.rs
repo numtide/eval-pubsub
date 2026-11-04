@@ -83,6 +83,8 @@ pub enum SubmitterError {
     Unregistered {},
     #[error("serde error {0}")]
     SerdeError(#[from] serde_json::error::Error),
+    #[error("sysinfo error {0}")]
+    SysinfoError(#[from] sysinfo::Error),
     #[error("unknown error")]
     Unknown,
 }
@@ -104,6 +106,7 @@ impl From<SubmitterError> for tonic::Status {
             SubmitterError::Unknown => tonic::Status::internal("unknown error"),
             SubmitterError::SerdeError(error) => tonic::Status::internal(error.to_string()),
             SubmitterError::JobOutputNotFound { .. } => tonic::Status::internal(value.to_string()),
+            SubmitterError::SysinfoError(error) => tonic::Status::internal(error.to_string()),
         }
     }
 }

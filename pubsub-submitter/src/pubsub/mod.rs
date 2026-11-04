@@ -106,13 +106,9 @@ impl PubSub for PubSubService {
             builder_uuid, builder_information
         );
 
-        db_connector::insert_builder(
+        db_connector::insert_builders(
             &mut conn,
-            builder_uuid,
-            &builder_information.system,
-            builder_information.smt_core_count,
-            builder_information.total_memory,
-            false,
+            models::Builder::new_from_uuid_and_system(&builder_uuid, &builder_information.system),
         )
         .await?;
 
@@ -200,8 +196,12 @@ impl PubSub for PubSubService {
             let pending_job = db_connector::take_pending_job(&mut conn, job_id).await?;
 
             match pending_job {
-                Some(eval_job) => {
-                    db_connector::insert_picked_jobs(conn, [(eval_job.id, builder_uuid)]).await?;
+                Some(pending_job) => {
+                    db_connector::insert_picked_jobs(
+                        conn,
+                        [models::PickedJob::new(pending_job.job_id, builder_uuid)],
+                    )
+                    .await?;
 
                     Ok(Response::new(proto::server::PickJobResponse {
                         pick_response: Some(proto::server::pick_job_response::PickResponse::Allow(

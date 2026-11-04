@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use crate::queue::Keyable;
+use crate::{error::SubmitterError, queue::Keyable};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildJob {
@@ -241,5 +241,46 @@ pub mod proto_conversion {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Builder {
+    pub uuid: Uuid,
+    pub system: String,
+    pub smt_core_count: i32,
+    // TODO this really ought to be u64 but that would need a postgresl extension
+    pub total_memory: u64,
+    pub active: bool,
+}
+
+impl Builder {
+    pub fn new_from_uuid_and_system<S>(uuid: &Uuid, system: S) -> Result<Self, SubmitterError>
+    where
+        S: AsRef<str>,
+    {
+        let sysinfo = sysinfo::System::new_with_specifics(
+            sysinfo::RefreshKind::nothing()
+                .with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram()),
+        )?;
+
+        Ok(Builder {
+            uuid: *uuid,
+            system: system.as_ref().to_owned(),
+            smt_core_count: std::thread::available_parallelism().unwrap().get() as i32,
+            total_memory: sysinfo.total_memory(),
+            active: false,
+        })
+    }
+}
+
+pub struct PickedJob {
+    pub id: Uuid,
+    pub builder_id: Uuid,
+}
+
+impl PickedJob {
+    pub fn new(id: Uuid, builder_id: Uuid) -> Self {
+        Self { id, builder_id }
     }
 }
