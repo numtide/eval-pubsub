@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use diesel::{
     Connection as _, ExpressionMethods as _, Insertable, OptionalExtension as _, PgConnection,
     SelectableHelper as _,
@@ -16,6 +18,8 @@ use diesel_async::{
     },
 };
 use diesel_migrations::MigrationHarness as _;
+use tokio::sync::RwLock;
+use tokio_postgres::{Client, NoTls};
 use tokio_stream::StreamExt as _;
 use uuid::Uuid;
 
@@ -34,6 +38,7 @@ pub const MIGRATIONS: diesel_migrations::EmbeddedMigrations =
 #[derive(Clone)]
 pub struct DBConnector {
     pg_pool: Pool<AsyncPgConnection>,
+    pub pg_client: Arc<RwLock<Client>>,
     database_url: String,
 }
 
@@ -381,7 +386,15 @@ where
 }
 
 impl DBConnector {
-    pub fn new<S>(database_url: S) -> Result<Self, Box<dyn std::error::Error>>
+    pub async fn new<S>(
+        database_url: S,
+    ) -> Result<
+        (
+            Self,
+            impl Future<Output = Result<(), tokio_postgres::Error>>,
+        ),
+        Box<dyn std::error::Error>,
+    >
     where
         S: AsRef<str>,
     {
@@ -389,11 +402,16 @@ impl DBConnector {
             database_url.as_ref(),
         );
         let pool = Pool::builder(config).build()?;
+        let (client, connection) = tokio_postgres::connect(database_url.as_ref(), NoTls).await?;
 
-        Ok(DBConnector {
-            pg_pool: pool,
-            database_url: database_url.as_ref().to_owned(),
-        })
+        Ok((
+            DBConnector {
+                pg_pool: pool,
+                pg_client: Arc::new(RwLock::new(client)),
+                database_url: database_url.as_ref().to_owned(),
+            },
+            connection,
+        ))
     }
 
     pub async fn get(&self) -> Result<Object<AsyncPgConnection>, SubmitterError> {

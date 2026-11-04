@@ -1,4 +1,7 @@
 #![allow(unstable_name_collisions)]
+use diesel::backend::Backend;
+use diesel::deserialize::{FromSql, Queryable, QueryableByName};
+use diesel::{IntoSql as _, sql_types};
 use diesel_async::pooled_connection::deadpool::Object;
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _};
 use pubsub_proto::pubsub as proto;
@@ -51,17 +54,17 @@ impl PubSubService {
     where
         S: AsRef<str>,
         F1: Future<Output = ()> + Send + 'static,
-        F2: Future + Send + 'static,
-        F2::Output: Send + 'static,
+        F2: Future<Output = ()> + Send + 'static,
     {
         let name = name.as_ref().to_owned();
         log::trace!("spawning background task with name {}", name);
         let join_set = self.join_set.clone();
         tokio::spawn(async move {
-            join_set.write().await.spawn(future);
-
-            log::trace!("background task with name {} exiting", name);
-            finally.await
+            join_set.write().await.spawn(async move {
+                future.await;
+                log::trace!("background task with name {} exiting", name);
+                finally.await
+            });
         })
     }
 }
@@ -494,6 +497,22 @@ impl PubSubClient for PubSubService {
     }
 }
 
+struct DatabaseName {
+    name: String,
+}
+
+impl<DB> Queryable<sql_types::Text, DB> for DatabaseName
+where
+    DB: Backend,
+    String: FromSql<sql_types::Text, DB>,
+{
+    type Row = String;
+
+    fn build(name: Self::Row) -> diesel::deserialize::Result<Self> {
+        Ok(Self { name })
+    }
+}
+
 impl PubSubService {
     pub async fn wait_shutdown(self) {
         let mut join_set = self.join_set.write().await;
@@ -507,14 +526,26 @@ impl PubSubService {
         }
     }
 
-    pub fn new<S>(database_url: S) -> Result<PubSubService, Box<dyn std::error::Error>>
+    pub async fn new<S>(database_url: S) -> Result<PubSubService, Box<dyn std::error::Error>>
     where
         S: AsRef<str>,
     {
+        let (db_connector, connection) = DBConnector::new(database_url.as_ref().to_owned()).await?;
         let pub_sub_service = PubSubService {
             join_set: Arc::new(RwLock::new(JoinSet::new())),
-            db_connector: DBConnector::new(database_url)?,
+            db_connector,
         };
+        pub_sub_service
+            .spawn(
+                "pg_client connection",
+                async move {
+                    log::debug!("starting one raw PSQL connection");
+                    connection.await.unwrap();
+                    log::debug!("exiting? PSQL connection");
+                },
+                async {},
+            )
+            .await;
 
         Ok(pub_sub_service)
     }
@@ -527,6 +558,18 @@ impl PubSubService {
 
     pub async fn clear_db(&mut self) {
         let mut conn = self.db_connector.get().await.through().unwrap();
+        if log::log_enabled!(log::Level::Info) {
+            let dbname: String = self
+                .db_connector
+                .pg_client
+                .write()
+                .await
+                .query_one("select current_database();", &[])
+                .await
+                .unwrap()
+                .get(0);
+            log::info!("clearing database {}", dbname);
+        };
 
         diesel::sql_query("DROP SCHEMA public CASCADE;")
             .execute(&mut conn)

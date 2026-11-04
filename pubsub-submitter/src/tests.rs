@@ -233,7 +233,7 @@ impl StubGrpc for SubmitterGrpcStub {
     type Client = PubSubClient<InterceptedService<Channel, StandardInterceptor>>;
 
     async fn make_service(&self, database_url: &'_ str) -> Self::Service {
-        let mut service = pubsub::PubSubService::new(database_url).unwrap();
+        let mut service = pubsub::PubSubService::new(database_url).await.unwrap();
         service.clear_db().await;
         service.run_migrations().unwrap();
         service
