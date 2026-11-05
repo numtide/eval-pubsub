@@ -53,6 +53,7 @@
               diesel-cli
               podman
               libpq
+              nix-eval-jobs
             ];
           };
         };
