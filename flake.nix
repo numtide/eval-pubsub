@@ -57,5 +57,14 @@
             ];
           };
         };
+
+      packages.default = pkgs'.${system}.callPackage ./nix/package.nix { };
+
+      checks = lib.optionalAttrs (lib.elem system lib.platforms.linux) {
+        e2e = import ./nix/e2e.nix {
+          pkgs = pkgs'.${system};
+          pubsub = inputs.self.packages.${system}.default;
+        };
+      };
     });
 }
