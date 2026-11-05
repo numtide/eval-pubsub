@@ -1,3 +1,4 @@
+mod cli;
 pub mod db;
 pub mod error;
 pub mod models;
@@ -8,38 +9,31 @@ pub mod schema;
 #[cfg(test)]
 mod tests;
 
-use std::net::SocketAddr;
-
-use clap::Parser;
-use pubsub_proto::pubsub::{
-    client::pub_sub_client_server::PubSubClientServer, server::pub_sub_server::PubSubServer,
-};
+use clap::Parser as _;
+use pubsub_proto::pubsub::server::pub_sub_server::PubSubServer;
 use tonic::transport::Server;
-
-#[derive(Parser)]
-struct Args {
-    #[arg(long, env = "PUBSUB_LISTEN", default_value = "[::1]:10000")]
-    listen: SocketAddr,
-    #[arg(long, env = "DATABASE_URL")]
-    database_url: String,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
-    let args = Args::parse();
+    if let Ok(_) = std::env::var("RUST_LOG") {
+        env_logger::init();
+    } else {
+        let _ = env_logger::builder()
+            .filter_level(log::LevelFilter::Info)
+            .init();
+    };
+    let cli: cli::Cli = cli::Cli::parse();
+    log::info!("running with config: {:?}", cli);
 
-    let mut svc = pubsub::PubSubService::new(&args.database_url).await?;
-    svc.run_migrations()
-        .map_err(|err| err as Box<dyn std::error::Error>)?;
+    let svc = pubsub::PubSubService::new(cli.database_url).await?;
 
-    log::info!("listening on {}", args.listen);
-
-    Server::builder()
-        .add_service(PubSubServer::new(svc.clone()))
-        .add_service(PubSubClientServer::new(svc))
-        .serve(args.listen)
-        .await?;
+    let server = PubSubServer::new(svc);
+    for addr in cli.listen_address {
+        Server::builder()
+            .add_service(server.clone())
+            .serve(addr)
+            .await?;
+    }
 
     Ok(())
 }
