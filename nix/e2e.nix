@@ -1,9 +1,14 @@
 {
   pkgs,
   pubsub,
+  lib ? pkgs.lib,
 }:
 
 let
+  pubsub-submitter = lib.getExe' pubsub "pubsub-submitter";
+  pubsub-builder = lib.getExe' pubsub "pubsub-builder";
+  pubsub-cli = lib.getExe' pubsub "pubsub-cli";
+
   hello = {
     name = "hello";
     system = pkgs.stdenv.hostPlatform.system;
@@ -29,8 +34,8 @@ let
 
   submitJob = pkgs.writeText "submit-job.json" (
     builtins.toJSON {
-      job.eval.flake = {
-        flakeRef = "path:${flake}";
+      EvalJob.Flake = {
+        flake_ref = "path:${flake}";
         attrs = [ "evalJobs" ];
       };
     }
@@ -68,11 +73,11 @@ pkgs.testers.runNixOSTest {
         environment = {
           DATABASE_URL = "host=/run/postgresql user=pubsub dbname=pubsub";
           PUBSUB_LISTEN = "[::]:10000";
-          RUST_LOG = "info";
+          RUST_LOG = "debug";
         };
         serviceConfig = {
           User = "pubsub";
-          ExecStart = "${pubsub}/bin/pubsub-submitter";
+          ExecStart = pubsub-submitter;
         };
       };
 
@@ -99,7 +104,7 @@ pkgs.testers.runNixOSTest {
         serviceConfig = {
           StateDirectory = "pubsub-builder";
           ExecStart = pkgs.lib.escapeShellArgs [
-            "${pubsub}/bin/pubsub-builder"
+            pubsub-builder
             "--submitter"
             "http://submitter:10000"
             "--state-dir"
@@ -107,7 +112,7 @@ pkgs.testers.runNixOSTest {
             "--store-uri"
             "ssh-ng://builder"
             "--nix-eval-jobs"
-            "${pkgs.nix-eval-jobs}/bin/nix-eval-jobs"
+            "${lib.getExe pkgs.nix-eval-jobs}"
           ];
         };
       };
@@ -134,10 +139,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("client submits an eval job"):
         submitter.succeed(
-            "grpcurl -plaintext"
-            " -import-path ${../pubsub-proto/proto/pubsub} -proto client.proto"
-            " -d @ localhost:10000 pubsub.client.PubSubClient/SubmitJob"
-            " < ${submitJob}"
+            '${pubsub-cli} --endpoint http://localhost:10000 submit-jobs "$(cat ${submitJob})"'
         )
 
     with subtest("builder evaluates and concludes the job"):
