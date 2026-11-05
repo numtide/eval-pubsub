@@ -21,6 +21,8 @@ sysinfo = "0.40"
 log = "0.4"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive", "env"] }
+axum = "0.8"
+futures = "0.3"
 
 [dev-dependencies]
 tokio-stream = { version = "0.1.8", features = ["net"] }
@@ -28,4 +30,3 @@ tower = { version = "0.4", features = ["util"] }
 hyper-util = "*"
 tempfile = "3.3.0"
 http = { version = "1.5" }
-axum-core = "0.5"

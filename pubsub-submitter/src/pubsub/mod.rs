@@ -526,7 +526,9 @@ impl PubSubService {
         }
     }
 
-    pub async fn new<S>(database_url: S) -> Result<PubSubService, Box<dyn std::error::Error>>
+    pub async fn new<S>(
+        database_url: S,
+    ) -> Result<PubSubService, Box<dyn std::error::Error + Send + Sync>>
     where
         S: AsRef<str>,
     {

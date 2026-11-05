@@ -393,7 +393,7 @@ impl DBConnector {
             Self,
             impl Future<Output = Result<(), tokio_postgres::Error>>,
         ),
-        Box<dyn std::error::Error>,
+        Box<dyn std::error::Error + Send + Sync>,
     >
     where
         S: AsRef<str>,
