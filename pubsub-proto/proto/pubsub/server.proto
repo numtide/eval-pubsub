@@ -58,6 +58,10 @@ message PickJobResponse {
 
 message ConcludeJobRequest {
   common.UUID job_id = 1;
+  common.JobStatus job_status = 2;
+  oneof result {
+    common.EvalResult eval = 3;
+  }
 }
 
 message ConcludeJobResponse {

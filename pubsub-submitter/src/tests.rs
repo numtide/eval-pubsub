@@ -363,6 +363,7 @@ async fn end_to_end() {
                                 system: String::from("x86_64-linux"),
                                 smt_core_count: 32,
                                 total_memory: 32 * 1024 * 1024 * 1024,
+                                store_uri: String::from("ssh-ng://builder"),
                             }),
                         }))
                         .await
@@ -523,6 +524,26 @@ async fn end_to_end() {
                             match client
                                 .conclude_job(Request::new(proto::server::ConcludeJobRequest {
                                     job_id: job_1.job_id,
+                                    job_status: Some(proto::common::JobStatus {
+                                        result: Some(proto::common::job_status::Result::Success(
+                                            proto::common::job_status::Success {},
+                                        )),
+                                    }),
+                                    result: Some(proto::server::conclude_job_request::Result::Eval(
+                                        proto::common::EvalResult {
+                                            attrs: vec![proto::common::eval_result::Attr {
+                                                attr_path: vec!["evalJobs".into(), "hello".into()],
+                                                result: Some(
+                                                    proto::common::eval_result::attr::Result::Derivation(
+                                                        proto::common::eval_result::Derivation {
+                                                            drv_path: "/nix/store/00000000000000000000000000000000-hello.drv".into(),
+                                                            system: "x86_64-linux".into(),
+                                                        },
+                                                    ),
+                                                ),
+                                            }],
+                                        },
+                                    )),
                                 }))
                                 .await
                                 .unwrap()

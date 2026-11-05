@@ -39,6 +39,28 @@ message BuilderInformation {
   string system = 2;
   int32 smt_core_count = 3;
   uint64 total_memory = 4;
+  string store_uri = 5;
+}
+
+message EvalResult {
+  message Derivation {
+    string drv_path = 1;
+    string system = 2;
+  }
+
+  message Failed {
+
+  }
+
+  message Attr {
+    repeated string attr_path = 1;
+    oneof result {
+      Derivation derivation = 2;
+      Failed failed = 3;
+    }
+  }
+
+  repeated Attr attrs = 1;
 }
 
 message JobStatus {
