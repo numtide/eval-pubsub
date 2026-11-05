@@ -1,0 +1,206 @@
+pub mod error;
+
+use std::net;
+
+use futures::{Stream, StreamExt as _};
+use pubsub_proto::pubsub::{
+    client::{self as client, pub_sub_client_client::PubSubClientClient},
+    common,
+};
+use tokio::net::unix;
+use tonic::{Request, Status, transport::Channel};
+use uuid::Uuid;
+
+use crate::error::{Error::Grpc, GrpcError};
+
+type Error = error::Error;
+
+pub struct Client<C> {
+    tonic_client: PubSubClientClient<C>,
+}
+
+pub enum JobStatus {
+    Success {},
+    Failure {},
+}
+
+pub enum EvalJob {
+    Flake {
+        flake_ref: String,
+        attrs: Vec<String>,
+    },
+}
+
+impl TryFrom<common::EvalJob> for EvalJob {
+    type Error = Error;
+
+    fn try_from(value: common::EvalJob) -> Result<Self, Self::Error> {
+        let value = value
+            .r#type
+            .ok_or(GrpcError::field_missing(&["type", "type"]))?;
+        match value {
+            common::eval_job::Type::Flake(flake) => Ok(EvalJob::Flake {
+                flake_ref: flake.flake_ref,
+                attrs: flake.attrs,
+            }),
+        }
+    }
+}
+
+pub struct BuildJob {
+    derivation: String,
+}
+
+impl TryFrom<common::BuildJob> for BuildJob {
+    type Error = Error;
+
+    fn try_from(value: common::BuildJob) -> Result<Self, Self::Error> {
+        Ok(BuildJob {
+            derivation: value.derivation,
+        })
+    }
+}
+
+pub enum AnonymousJob {
+    EvalJob(EvalJob),
+    BuildJob(BuildJob),
+}
+
+impl From<AnonymousJob> for common::AnonymousJob {
+    fn from(value: AnonymousJob) -> Self {
+        todo!()
+    }
+}
+
+impl TryFrom<common::AnonymousJob> for AnonymousJob {
+    type Error = Error;
+
+    fn try_from(value: common::AnonymousJob) -> Result<Self, Self::Error> {
+        match value.r#type.ok_or(GrpcError::field_missing(&["type"]))? {
+            common::anonymous_job::Type::Eval(eval_job) => Ok(Self::EvalJob(eval_job.try_into()?)),
+            common::anonymous_job::Type::Build(build_job) => {
+                Ok(Self::BuildJob(build_job.try_into()?))
+            }
+        }
+    }
+}
+
+pub struct Builder {
+    pub uuid: Uuid,
+    pub system: String,
+    pub smt_core_count: i32,
+    pub total_memory: u64,
+}
+
+impl TryFrom<common::BuilderInformation> for Builder {
+    type Error = Error;
+
+    fn try_from(value: common::BuilderInformation) -> Result<Self, Self::Error> {
+        Ok(Self {
+            uuid: value
+                .uuid
+                .ok_or(GrpcError::field_missing(&["uuid"]))?
+                .into(),
+            system: value.system,
+            smt_core_count: value.smt_core_count,
+            total_memory: value.total_memory,
+        })
+    }
+}
+
+pub struct Job {
+    pub uuid: Uuid,
+    pub anonymous: AnonymousJob,
+}
+
+impl TryFrom<common::Job> for Job {
+    type Error = Error;
+
+    fn try_from(value: common::Job) -> Result<Self, Self::Error> {
+        Ok(Self {
+            uuid: value
+                .job_id
+                .ok_or(GrpcError::field_missing(&["uuid"]))?
+                .into(),
+            anonymous: value
+                .anonymous_job
+                .ok_or(GrpcError::field_missing(&["anonymous"]))
+                .map_err(Into::<GrpcError>::into)?
+                .try_into()?,
+        })
+    }
+}
+
+impl Client<Channel> {
+    pub async fn new<S>(address: S) -> Result<Self, Error>
+    where
+        S: AsRef<str>,
+    {
+        PubSubClientClient::connect(address.as_ref().to_owned())
+            .await
+            .map(|tonic_client| Client { tonic_client })
+            .map_err(Into::<GrpcError>::into)
+            .map_err(Into::into)
+    }
+    pub async fn submit_job(&mut self, anonymous_job: AnonymousJob) -> Result<Uuid, Error> {
+        let response = self
+            .tonic_client
+            .submit_job(Request::new(client::SubmitJobRequest {
+                job: Some(anonymous_job.into()),
+            }))
+            .await
+            .map_err(Into::<GrpcError>::into)?;
+
+        Ok(response.into_inner().job_id.unwrap().into())
+    }
+    pub async fn tail_job(
+        &mut self,
+        job_uuid: Uuid,
+    ) -> Result<impl Stream<Item = Result<String, Status>>, Error> {
+        let stream = self
+            .tonic_client
+            .tail_job(Request::new(client::TailJobRequest {
+                job_id: Some(job_uuid.into()),
+            }))
+            .await
+            .map_err(Into::<GrpcError>::into)?
+            .into_inner()
+            .map(|response| response.map(|response| response.line));
+        Ok(stream)
+    }
+    pub async fn wait_job(&mut self, job_uuid: Uuid) -> JobStatus {
+        todo!()
+    }
+    pub async fn list_jobs(&mut self, page: i32, count: i32) -> Result<(Vec<Job>, i32), Error> {
+        let response = self
+            .tonic_client
+            .list_jobs(Request::new(client::ListJobsRequest { page, count }))
+            .await
+            .map_err(Into::<GrpcError>::into)?
+            .into_inner();
+        let jobs = response
+            .jobs
+            .into_iter()
+            .map(|job| job.try_into())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((jobs, response.total))
+    }
+    pub async fn list_builders(
+        &mut self,
+        page: i32,
+        count: i32,
+    ) -> Result<(Vec<Builder>, i32), Error> {
+        let response = self
+            .tonic_client
+            .list_builders(Request::new(client::ListBuildersRequest { page, count }))
+            .await
+            .map_err(Into::<GrpcError>::into)?
+            .into_inner();
+        let builders = response
+            .builders
+            .into_iter()
+            .map(|builder_information| builder_information.try_into())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((builders, response.total))
+    }
+}
