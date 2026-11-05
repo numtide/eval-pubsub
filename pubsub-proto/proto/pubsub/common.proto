@@ -42,6 +42,11 @@ message BuilderInformation {
   string store_uri = 5;
 }
 
+message Builder {
+  BuilderInformation information = 1;
+  bool active = 2;
+}
+
 message EvalResult {
   message Derivation {
     string drv_path = 1;

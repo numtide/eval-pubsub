@@ -1,6 +1,10 @@
+use pubsub_proto::pubsub as proto;
 use uuid::Uuid;
 
-use crate::{error::SubmitterError, queue::Keyable};
+use crate::{
+    error::{ProtocolError, SubmitterError},
+    queue::Keyable,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildJob {
@@ -239,6 +243,21 @@ pub mod proto_conversion {
                         anonymous_job,
                     })
                 }
+            }
+        }
+    }
+
+    impl From<super::Builder> for proto::common::Builder {
+        fn from(value: super::Builder) -> Self {
+            Self {
+                information: Some(proto::common::BuilderInformation {
+                    uuid: Some(value.uuid.into()),
+                    system: value.system,
+                    smt_core_count: value.smt_core_count,
+                    total_memory: value.total_memory,
+                    store_uri: value.store_uri,
+                }),
+                active: value.active,
             }
         }
     }

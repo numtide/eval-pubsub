@@ -101,19 +101,6 @@ pub async fn get_job(
 
 pub async fn get_jobs(
     conn: &mut Object<AsyncPgConnection>,
-) -> Result<Vec<models::Job>, SubmitterError> {
-    eval_job::dsl::eval_job
-        .select(db::models::EvalJob::as_select())
-        .load(conn)
-        .await?
-        .into_iter()
-        .map(TryInto::try_into)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-pub async fn get_eval_jobs_paginated(
-    conn: &mut Object<AsyncPgConnection>,
     page: i64,
     count: i64,
 ) -> Result<(Vec<models::Job>, i64), SubmitterError> {
@@ -311,6 +298,32 @@ pub async fn get_builder(
         .await
         .optional()
         .map_err(Into::into)
+}
+
+pub async fn get_builders(
+    conn: &mut Object<AsyncPgConnection>,
+    page: i64,
+    count: i64,
+) -> Result<(Vec<models::Builder>, i64), SubmitterError> {
+    conn.transaction(async |mut conn| {
+        let eval_jobs = builder::dsl::builder
+            .select(db::models::Builder::as_select())
+            .limit(count)
+            .offset(page * count)
+            .load(&mut conn)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>()
+            .into();
+        let total = eval_job::dsl::eval_job
+            .select(diesel::dsl::count(eval_job::dsl::id))
+            .first(&mut conn)
+            .await?;
+
+        Ok((eval_jobs, total))
+    })
+    .await
 }
 
 pub trait PgNotifiable {

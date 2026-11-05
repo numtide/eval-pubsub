@@ -1,18 +1,15 @@
 pub mod error;
 
-use std::net;
-
 use futures::{Stream, StreamExt as _};
 use pubsub_proto::pubsub::{
     client::{self as client, pub_sub_client_client::PubSubClientClient},
     common,
 };
 use serde::{Deserialize, Serialize};
-use tokio::net::unix;
 use tonic::{Request, Status, transport::Channel};
 use uuid::Uuid;
 
-use crate::error::{Error::Grpc, GrpcError};
+use crate::error::GrpcError;
 
 type Error = error::Error;
 
@@ -120,14 +117,15 @@ impl TryFrom<common::AnonymousJob> for AnonymousJob {
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
-pub struct Builder {
+pub struct BuilderInformation {
     pub uuid: Uuid,
     pub system: String,
     pub smt_core_count: i32,
     pub total_memory: u64,
+    pub store_uri: String,
 }
 
-impl TryFrom<common::BuilderInformation> for Builder {
+impl TryFrom<common::BuilderInformation> for BuilderInformation {
     type Error = Error;
 
     fn try_from(value: common::BuilderInformation) -> Result<Self, Self::Error> {
@@ -139,6 +137,27 @@ impl TryFrom<common::BuilderInformation> for Builder {
             system: value.system,
             smt_core_count: value.smt_core_count,
             total_memory: value.total_memory,
+            store_uri: value.store_uri,
+        })
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
+pub struct Builder {
+    pub information: BuilderInformation,
+    pub active: bool,
+}
+
+impl TryFrom<common::Builder> for Builder {
+    type Error = Error;
+
+    fn try_from(value: common::Builder) -> Result<Self, Self::Error> {
+        Ok(Self {
+            information: value
+                .information
+                .ok_or(GrpcError::field_missing(&["information"]))?
+                .try_into()?,
+            active: value.active,
         })
     }
 }
@@ -235,7 +254,7 @@ impl Client<Channel> {
         let builders = response
             .builders
             .into_iter()
-            .map(|builder_information| builder_information.try_into())
+            .map(|builder| builder.try_into())
             .collect::<Result<Vec<_>, _>>()?;
         Ok((builders, response.total))
     }

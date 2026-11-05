@@ -99,7 +99,7 @@ impl PubSub for PubSubService {
             .builder_information
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["builder_information"]))?;
-        let builder_uuid = builder_information
+        let builder_uuid: Uuid = builder_information
             .uuid
             .ok_or(ProtocolError::field_missing(&[
                 "builder_information",
@@ -115,7 +115,7 @@ impl PubSub for PubSubService {
 
         db_connector::insert_builders(
             &mut conn,
-            models::Builder::new_from_uuid_and_system(&builder_uuid, &builder_information.system),
+            models::Builder::from_information(builder_information, false),
         )
         .await?;
 
@@ -474,9 +474,9 @@ impl PubSubClient for PubSubService {
         let page = request.get_ref().page;
         let count = request.get_ref().count;
 
-        log::info!("client listing all jobs");
+        log::info!("client listing jobs");
 
-        db_connector::get_eval_jobs_paginated(&mut conn, page as i64, count as i64)
+        db_connector::get_jobs(&mut conn, page as i64, count as i64)
             .await
             .map(|(jobs, total)| {
                 Response::new(proto::client::ListJobsResponse {
@@ -491,9 +491,21 @@ impl PubSubClient for PubSubService {
         &self,
         request: Request<proto::client::ListBuildersRequest>,
     ) -> Result<Response<proto::client::ListBuildersResponse>, Status> {
+        let mut conn = self.db_connector.get().await?;
+        let page = request.get_ref().page;
+        let count = request.get_ref().count;
+
         log::info!("client listing builders");
 
-        Err(Status::unimplemented("todo"))
+        db_connector::get_builders(&mut conn, page as i64, count as i64)
+            .await
+            .map(|(builders, total)| {
+                Response::new(proto::client::ListBuildersResponse {
+                    builders: builders.into_iter().map(Into::into).collect(),
+                    total: total as i32,
+                })
+            })
+            .map_err(Into::into)
     }
 }
 

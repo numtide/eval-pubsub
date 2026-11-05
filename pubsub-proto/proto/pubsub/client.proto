@@ -54,6 +54,6 @@ message ListBuildersRequest {
 }
 
 message ListBuildersResponse {
-  repeated common.BuilderInformation builders = 1;
+  repeated common.Builder builders = 1;
   int32 total = 2;
 }
