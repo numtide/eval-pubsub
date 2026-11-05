@@ -13,6 +13,7 @@ diesel::table! {
         smt_core_count -> Int4,
         total_memory -> Int8,
         active -> Bool,
+        store_uri -> Text,
     }
 }
 

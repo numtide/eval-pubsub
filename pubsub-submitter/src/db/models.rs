@@ -164,6 +164,7 @@ pub struct Builder {
     pub smt_core_count: i32,
     // TODO this really ought to be u64 but that would need a postgresl extension
     pub total_memory: i64,
+    pub store_uri: String,
     pub active: bool,
 }
 
@@ -173,6 +174,7 @@ impl From<Builder> for models::Builder {
             system,
             smt_core_count,
             active,
+            store_uri,
             ..
         } = value;
         Self {
@@ -180,6 +182,7 @@ impl From<Builder> for models::Builder {
             system,
             smt_core_count,
             total_memory: value.total_memory as u64,
+            store_uri,
             active,
         }
     }
@@ -191,6 +194,7 @@ impl From<models::Builder> for Builder {
             system,
             smt_core_count,
             active,
+            store_uri,
             ..
         } = value;
         Self {
@@ -199,6 +203,7 @@ impl From<models::Builder> for Builder {
             smt_core_count,
             total_memory: value.total_memory as i64,
             active,
+            store_uri,
         }
     }
 }

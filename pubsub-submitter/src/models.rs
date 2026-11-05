@@ -270,25 +270,25 @@ pub struct Builder {
     pub smt_core_count: i32,
     // TODO this really ought to be u64 but that would need a postgresl extension
     pub total_memory: u64,
+    pub store_uri: String,
     pub active: bool,
 }
 
 impl Builder {
-    pub fn new_from_uuid_and_system<S>(uuid: &Uuid, system: S) -> Result<Self, SubmitterError>
-    where
-        S: AsRef<str>,
-    {
-        let sysinfo = sysinfo::System::new_with_specifics(
-            sysinfo::RefreshKind::nothing()
-                .with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram()),
-        )?;
-
+    pub fn from_information(
+        information: &proto::common::BuilderInformation,
+        active: bool,
+    ) -> Result<Self, SubmitterError> {
         Ok(Builder {
-            uuid: *uuid,
-            system: system.as_ref().to_owned(),
-            smt_core_count: std::thread::available_parallelism().unwrap().get() as i32,
-            total_memory: sysinfo.total_memory(),
-            active: false,
+            uuid: information
+                .uuid
+                .ok_or(ProtocolError::field_missing(&["uuid"]))?
+                .into(),
+            system: information.system.clone(),
+            smt_core_count: information.smt_core_count,
+            total_memory: information.total_memory,
+            store_uri: information.store_uri.clone(),
+            active: active,
         })
     }
 }
