@@ -15,6 +15,7 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../pubsub-builder
+      ../pubsub-cli
       ../pubsub-client
       ../pubsub-common
       ../pubsub-proto

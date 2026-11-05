@@ -7,6 +7,7 @@ use pubsub_proto::pubsub::{
     client::{self as client, pub_sub_client_client::PubSubClientClient},
     common,
 };
+use serde::{Deserialize, Serialize};
 use tokio::net::unix;
 use tonic::{Request, Status, transport::Channel};
 use uuid::Uuid;
@@ -15,20 +16,36 @@ use crate::error::{Error::Grpc, GrpcError};
 
 type Error = error::Error;
 
+#[derive(Clone)]
 pub struct Client<C> {
     tonic_client: PubSubClientClient<C>,
 }
 
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
 pub enum JobStatus {
     Success {},
     Failure {},
 }
 
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
 pub enum EvalJob {
     Flake {
         flake_ref: String,
         attrs: Vec<String>,
     },
+}
+
+impl From<EvalJob> for common::EvalJob {
+    fn from(value: EvalJob) -> Self {
+        match value {
+            EvalJob::Flake { flake_ref, attrs } => Self {
+                r#type: Some(common::eval_job::Type::Flake(common::eval_job::Flake {
+                    flake_ref,
+                    attrs,
+                })),
+            },
+        }
+    }
 }
 
 impl TryFrom<common::EvalJob> for EvalJob {
@@ -47,8 +64,17 @@ impl TryFrom<common::EvalJob> for EvalJob {
     }
 }
 
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
 pub struct BuildJob {
     derivation: String,
+}
+
+impl From<BuildJob> for common::BuildJob {
+    fn from(value: BuildJob) -> Self {
+        Self {
+            derivation: value.derivation,
+        }
+    }
 }
 
 impl TryFrom<common::BuildJob> for BuildJob {
@@ -61,6 +87,7 @@ impl TryFrom<common::BuildJob> for BuildJob {
     }
 }
 
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
 pub enum AnonymousJob {
     EvalJob(EvalJob),
     BuildJob(BuildJob),
@@ -68,7 +95,14 @@ pub enum AnonymousJob {
 
 impl From<AnonymousJob> for common::AnonymousJob {
     fn from(value: AnonymousJob) -> Self {
-        todo!()
+        match value {
+            AnonymousJob::EvalJob(eval_job) => common::AnonymousJob {
+                r#type: Some(common::anonymous_job::Type::Eval(eval_job.into())),
+            },
+            AnonymousJob::BuildJob(build_job) => common::AnonymousJob {
+                r#type: Some(common::anonymous_job::Type::Build(build_job.into())),
+            },
+        }
     }
 }
 
@@ -85,6 +119,7 @@ impl TryFrom<common::AnonymousJob> for AnonymousJob {
     }
 }
 
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
 pub struct Builder {
     pub uuid: Uuid,
     pub system: String,
@@ -108,6 +143,7 @@ impl TryFrom<common::BuilderInformation> for Builder {
     }
 }
 
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
 pub struct Job {
     pub uuid: Uuid,
     pub anonymous: AnonymousJob,
@@ -156,7 +192,7 @@ impl Client<Channel> {
     pub async fn tail_job(
         &mut self,
         job_uuid: Uuid,
-    ) -> Result<impl Stream<Item = Result<String, Status>>, Error> {
+    ) -> Result<impl Stream<Item = Result<String, Status>> + use<>, Error> {
         let stream = self
             .tonic_client
             .tail_job(Request::new(client::TailJobRequest {
@@ -168,7 +204,7 @@ impl Client<Channel> {
             .map(|response| response.map(|response| response.line));
         Ok(stream)
     }
-    pub async fn wait_job(&mut self, job_uuid: Uuid) -> JobStatus {
+    pub async fn wait_job(&mut self, job_uuid: Uuid) -> Result<JobStatus, Error> {
         todo!()
     }
     pub async fn list_jobs(&mut self, page: i32, count: i32) -> Result<(Vec<Job>, i32), Error> {

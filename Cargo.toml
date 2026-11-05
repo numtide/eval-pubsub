@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "pubsub-builder",
+  "pubsub-cli",
   "pubsub-client",
   "pubsub-common",
   "pubsub-proto",
