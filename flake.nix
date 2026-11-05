@@ -61,7 +61,7 @@
       packages.default = pkgs'.${system}.callPackage ./nix/package.nix { };
 
       checks = lib.optionalAttrs (lib.elem system lib.platforms.linux) {
-        e2e = import ./nix/e2e.nix {
+        e2e = import ./nix/e2e {
           pkgs = pkgs'.${system};
           pubsub = inputs.self.packages.${system}.default;
         };
