@@ -35,7 +35,7 @@
           default = pkgs.mkShell {
             shellHook = ''
               export FLAKE_ROOT=$PWD
-              export DATABASE_URL="postgres://postgres:mysecretpassword@pubsub?host=$(realpath $FLAKE_ROOT/postgres/)"
+              export DATABASE_URL="postgres:///pubsub?host=$(realpath $FLAKE_ROOT/postgres/)"
 
               . ${./shell-hook.sh}
             '';
@@ -54,6 +54,7 @@
               podman
               libpq
               nix-eval-jobs
+              postgresql_18
             ];
           };
         };
