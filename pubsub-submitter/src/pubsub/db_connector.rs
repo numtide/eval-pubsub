@@ -8,7 +8,7 @@ use diesel::{
     query_builder::{QueryFragment, QueryId},
     query_dsl::QueryDsl as _,
     sql_query,
-    sql_types::Text,
+    sql_types::{self, Text},
 };
 use diesel_async::{
     AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _,
@@ -103,24 +103,81 @@ pub async fn get_jobs(
     conn: &mut Object<AsyncPgConnection>,
     page: i64,
     count: i64,
-) -> Result<(Vec<models::Job>, i64), SubmitterError> {
-    conn.transaction(async |mut conn| {
-        let eval_jobs = eval_job::dsl::eval_job
-            .select(db::models::EvalJob::as_select())
-            .limit(count)
-            .offset(page * count)
-            .load(&mut conn)
+    filter: Option<models::JobFilter>,
+) -> Result<(Vec<models::JobWithStatus>, i64), SubmitterError> {
+    conn.transaction(async |conn| match filter {
+        Some(models::JobFilter::Pending) => todo!(),
+        Some(models::JobFilter::Picked) => todo!(),
+        Some(models::JobFilter::Suceeded) => todo!(),
+        Some(models::JobFilter::Failed) => todo!(),
+        None => {
+            let jobs = sql_query(
+                "SELECT
+                   *,
+                   EXISTS (
+                     SELECT 1
+                     FROM pending_eval_job
+                     WHERE pending_eval_job.id = eval_job.id
+                   ) AS pending,
+                   EXISTS (
+                     SELECT 1
+                     FROM concluded_eval_job
+                     WHERE concluded_eval_job.id = eval_job.id
+                   ) AS concluded,
+                   EXISTS (
+                     SELECT 1
+                     FROM picked_eval_job
+                     WHERE picked_eval_job.id = eval_job.id
+                   ) as picked
+                   FROM eval_job
+                   OFFSET $1
+                   LIMIT $2;
+                ",
+            )
+            .bind::<sql_types::BigInt, _>(page * count)
+            .bind::<sql_types::BigInt, _>(count)
+            .load::<db::models::EvalJobWithStatus>(conn)
             .await?
             .into_iter()
             .map(TryInto::try_into)
-            .collect::<Result<Vec<_>, _>>()?
-            .into();
-        let total = eval_job::dsl::eval_job
-            .select(diesel::dsl::count(eval_job::dsl::id))
-            .first(&mut conn)
-            .await?;
+            .collect::<Result<Vec<_>, _>>()?;
 
-        Ok((eval_jobs, total))
+            // let binders = (0..uuids.len())
+            //     .map(|idx| format!("(${}::uuid)", idx + 1))
+            //     .collect::<String>();
+
+            // sql_query(
+            //     "SELECT
+            //        id,
+            //        EXISTS (
+            //          SELECT 1
+            //          FROM pending_eval_job
+            //          WHERE pending_eval_job.id = eval_job.id
+            //        ) AS pending,
+            //        EXISTS (
+            //          SELECT 1
+            //          FROM concluded_eval_job
+            //          WHERE concluded_eval_job.id = eval_job.id
+            //        ) AS concluded,
+            //        EXISTS (
+            //          SELECT 1
+            //          FROM picked_eval_job
+            //          WHERE picked_eval_job.id = eval_job.id
+            //        ) as picked from eval_job
+            //        WHERE id = any (
+            //          SELECT subset.uuid
+            //          FROM (
+            //            VALUES
+            //              ('00000000-0000-0000-0000-000000000000'::uuid),
+            //              ('00000000-0000-0000-0000-000000000001'),
+            //              ('00000000-0000-0000-0000-000000000002')
+            //          ) as subset (uuid)
+            //        );
+            //     ",
+            // );
+
+            Ok((jobs, 0))
+        }
     })
     .await
 }

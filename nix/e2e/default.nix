@@ -73,7 +73,7 @@ pkgs.testers.runNixOSTest {
         environment = {
           DATABASE_URL = "host=/run/postgresql user=pubsub dbname=pubsub";
           PUBSUB_LISTEN = "[::]:10000";
-          RUST_LOG = "debug";
+          RUST_LOG = "pubsub-=debug";
         };
         serviceConfig = {
           User = "pubsub";
@@ -99,7 +99,7 @@ pkgs.testers.runNixOSTest {
         after = [ "network-online.target" ];
         environment = {
           HOME = "/var/lib/pubsub-builder";
-          RUST_LOG = "info";
+          RUST_LOG = "pubsub-=debug";
         };
         serviceConfig = {
           StateDirectory = "pubsub-builder";
@@ -121,6 +121,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     __pubsub_cli = "${pubsub-cli}"
+    __jq = "${lib.getExe pkgs.jq}"
     __submit_job = "${submitJob}"
     __hello_drv_path = "${helloDrvPath}"
 

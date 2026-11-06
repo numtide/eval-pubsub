@@ -28,10 +28,10 @@ with subtest("client submits an eval job"):
     submitter.succeed(f'{__pubsub_cli} --endpoint http://localhost:10000 submit-jobs "@{__submit_job}"')
 
 with subtest("builder evaluates and concludes the job"):
-    submitter.wait_until_succeeds(
-        "runuser -u postgres -- psql pubsub -tAc 'select count(*) from concluded_eval_job' | grep -qx 1",
+    print(submitter.wait_until_succeeds(
+        f"{__pubsub_cli} --endpoint http://localhost:10000 list-jobs 0 100 | {__jq} '.status' | grep -q 'Succeeded'",
         timeout=120,
-    )
+    ))
     assert psql("select builder_id from concluded_eval_job") == builder_uuid
 
 with subtest("job output carries evaluation results and errors"):

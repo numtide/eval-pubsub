@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf};
 
-use pubsub_client::AnonymousJob;
+use pubsub_client::{AnonymousJob, JobFilter};
 use uuid::Uuid;
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -23,6 +23,16 @@ fn parse_anonymous_jobs(val: &str) -> Result<Data, String> {
     }
 }
 
+fn parse_job_filter(val: &str) -> Result<JobFilter, String> {
+    match val {
+        "pending" => Ok(JobFilter::Pending),
+        "picked" => Ok(JobFilter::Picked),
+        "Succeeded" => Ok(JobFilter::Succeeded),
+        "Failed" => Ok(JobFilter::Failed),
+        _ => Err(format!("unknown job filter type: {}", val)),
+    }
+}
+
 #[derive(clap::Subcommand, PartialEq, Eq, Clone, Debug)]
 pub enum Command {
     SubmitJobs {
@@ -38,6 +48,8 @@ pub enum Command {
     ListJobs {
         page: i32,
         count: i32,
+        #[arg(value_parser=parse_job_filter)]
+        filter: Option<JobFilter>,
     },
     ListBuilders {
         page: i32,

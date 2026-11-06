@@ -1,5 +1,7 @@
 pub mod error;
 
+use std::io::ErrorKind::StaleNetworkFileHandle;
+
 use futures::{Stream, StreamExt as _};
 use pubsub_proto::pubsub::{
     client::{self as client, pub_sub_client_client::PubSubClientClient},
@@ -19,9 +21,58 @@ pub struct Client<C> {
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
+pub enum JobFilter {
+    Pending,
+    Picked,
+    Failed,
+    Succeeded,
+}
+
+impl TryFrom<JobFilter> for client::list_jobs_request::Filter {
+    type Error = Error;
+
+    fn try_from(value: JobFilter) -> Result<Self, Self::Error> {
+        match value {
+            JobFilter::Pending => Ok(client::list_jobs_request::Filter::Pending(
+                client::list_jobs_request::FilterPending {},
+            )),
+            JobFilter::Picked => Ok(client::list_jobs_request::Filter::Picked(
+                client::list_jobs_request::FilterPicked {},
+            )),
+            JobFilter::Failed => Ok(client::list_jobs_request::Filter::Failed(
+                client::list_jobs_request::FilterFailed {},
+            )),
+            JobFilter::Succeeded => Ok(client::list_jobs_request::Filter::Succeeded(
+                client::list_jobs_request::FilterSucceeded {},
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
 pub enum JobStatus {
-    Success {},
-    Failure {},
+    Pending,
+    Picked,
+    Failed,
+    Succeeded,
+}
+
+impl TryFrom<common::JobStatus> for JobStatus {
+    type Error = Error;
+
+    fn try_from(value: common::JobStatus) -> Result<Self, Self::Error> {
+        match value.status.ok_or(GrpcError::field_missing(&["status"]))? {
+            common::job_status::Status::Pending(_) => Ok(JobStatus::Pending),
+            common::job_status::Status::Picked(_) => Ok(JobStatus::Picked),
+            common::job_status::Status::Concluded(concluded) => match concluded
+                .conclusion
+                .ok_or(GrpcError::field_missing(&["status", "conclusion"]))?
+            {
+                common::job_status::concluded::Conclusion::Success(_) => Ok(JobStatus::Succeeded),
+                common::job_status::concluded::Conclusion::Failure(_) => Ok(JobStatus::Failed),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
@@ -186,6 +237,29 @@ impl TryFrom<common::Job> for Job {
     }
 }
 
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
+pub struct JobWithStatus {
+    pub job: Job,
+    pub status: JobStatus,
+}
+
+impl TryFrom<common::JobWithStatus> for JobWithStatus {
+    type Error = Error;
+
+    fn try_from(value: common::JobWithStatus) -> Result<Self, Error> {
+        Ok(Self {
+            job: value
+                .job
+                .ok_or(GrpcError::field_missing(&["job"]))?
+                .try_into()?,
+            status: value
+                .status
+                .ok_or(GrpcError::field_missing(&["status"]))?
+                .try_into()?,
+        })
+    }
+}
+
 impl Client<Channel> {
     pub async fn new<S>(address: S) -> Result<Self, Error>
     where
@@ -226,10 +300,19 @@ impl Client<Channel> {
     pub async fn wait_job(&mut self, job_uuid: Uuid) -> Result<JobStatus, Error> {
         todo!()
     }
-    pub async fn list_jobs(&mut self, page: i32, count: i32) -> Result<(Vec<Job>, i32), Error> {
+    pub async fn list_jobs(
+        &mut self,
+        page: i32,
+        count: i32,
+        filter: Option<JobFilter>,
+    ) -> Result<(Vec<JobWithStatus>, i32), Error> {
         let response = self
             .tonic_client
-            .list_jobs(Request::new(client::ListJobsRequest { page, count }))
+            .list_jobs(Request::new(client::ListJobsRequest {
+                page,
+                count,
+                filter: filter.map(TryInto::try_into).transpose()?,
+            }))
             .await
             .map_err(Into::<GrpcError>::into)?
             .into_inner();

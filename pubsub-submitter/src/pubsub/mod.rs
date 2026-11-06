@@ -475,10 +475,11 @@ impl PubSubClient for PubSubService {
         let mut conn = self.db_connector.get().await?;
         let page = request.get_ref().page;
         let count = request.get_ref().count;
+        let filter = request.get_ref().filter;
 
         log::info!("client listing jobs");
 
-        db_connector::get_jobs(&mut conn, page as i64, count as i64)
+        db_connector::get_jobs(&mut conn, page as i64, count as i64, filter.map(Into::into))
             .await
             .map(|(jobs, total)| {
                 Response::new(proto::client::ListJobsResponse {
@@ -487,28 +488,6 @@ impl PubSubClient for PubSubService {
                 })
             })
             .map_err(Into::into)
-    }
-
-    async fn list_jobs_with_status(
-        &self,
-        request: Request<proto::client::ListJobsWithStatusRequest>,
-    ) -> Result<Response<proto::client::ListJobsWithStatusResponse>, Status> {
-        todo!()
-        // let mut conn = self.db_connector.get().await?;
-        // let page = request.get_ref().page;
-        // let count = request.get_ref().count;
-
-        // log::info!("client listing jobs");
-
-        // db_connector::get_jobs(&mut conn, page as i64, count as i64)
-        //     .await
-        //     .map(|(jobs, total)| {
-        //         Response::new(proto::client::ListJobsResponse {
-        //             jobs: jobs.into_iter().map(Into::into).collect(),
-        //             total: total as i32,
-        //         })
-        //     })
-        //     .map_err(Into::into)
     }
 
     async fn list_builders(

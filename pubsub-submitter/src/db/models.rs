@@ -2,7 +2,7 @@ use std::io::Write as _;
 
 use diesel::{
     Selectable,
-    deserialize::{self, FromSql, FromSqlRow, Queryable},
+    deserialize::{self, FromSql, FromSqlRow, Queryable, QueryableByName},
     expression::AsExpression,
     prelude::Insertable,
     serialize::{IsNull, ToSql},
@@ -152,6 +152,60 @@ impl TryFrom<EvalJob> for models::Job {
                 },
             }),
         }
+    }
+}
+
+#[derive(QueryableByName)]
+pub struct EvalJobWithStatus {
+    #[diesel(column_name = "id", sql_type = diesel::sql_types::Uuid)]
+    pub uuid: Uuid,
+    #[diesel(column_name = "type", sql_type = diesel::sql_types::Text)]
+    pub r#type: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    pub flake_ref: String,
+    #[diesel(sql_type = diesel::sql_types::Array<diesel::sql_types::Text>)]
+    pub attrs: Vec<String>,
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    pub pending: bool,
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    pub picked: bool,
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    pub concluded: bool,
+}
+
+impl TryFrom<EvalJobWithStatus> for models::JobWithStatus {
+    type Error = ();
+
+    fn try_from(value: EvalJobWithStatus) -> Result<Self, Self::Error> {
+        assert!(value.picked ^ value.pending ^ value.concluded);
+        Ok(Self {
+            job: models::Job {
+                job_id: value.uuid,
+                anonymous_job: models::AnonymousJob::EvalJob {
+                    eval_job: match value.r#type.as_str() {
+                        "flake" => models::EvalJob::Flake {
+                            flake_ref: value.flake_ref,
+                            attrs: value.attrs,
+                        },
+                        _ => Err(())?,
+                    },
+                },
+            },
+            status: if value.pending {
+                models::JobStatus::Pending
+            } else if value.picked {
+                models::JobStatus::Picked
+            } else if value.concluded {
+                log::warn!("for now always reporting jobs as succeeded");
+                models::JobStatus::Suceeded
+            } else {
+                log::error!(
+                    "job {} was neither pending, picked, nor concluded",
+                    value.uuid
+                );
+                Err(())?
+            },
+        })
     }
 }
 

@@ -25,6 +25,25 @@ pub enum AnonymousJob {
     BuildJob { build_job: BuildJob },
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum JobFilter {
+    Pending,
+    Picked,
+    Suceeded,
+    Failed,
+}
+
+impl From<proto::client::list_jobs_request::Filter> for JobFilter {
+    fn from(value: proto::client::list_jobs_request::Filter) -> Self {
+        match value {
+            proto::client::list_jobs_request::Filter::Pending(_) => JobFilter::Pending,
+            proto::client::list_jobs_request::Filter::Picked(_) => JobFilter::Picked,
+            proto::client::list_jobs_request::Filter::Failed(_) => JobFilter::Failed,
+            proto::client::list_jobs_request::Filter::Succeeded(_) => JobFilter::Suceeded,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
     pub job_id: Uuid,
@@ -46,6 +65,68 @@ impl BuildJob {
     {
         Self {
             derivation: derivation.as_ref().to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum JobStatus {
+    Pending,
+    Picked,
+    Suceeded,
+    Failed,
+}
+
+impl From<JobStatus> for proto::common::JobStatus {
+    fn from(value: JobStatus) -> Self {
+        match value {
+            JobStatus::Pending => Self {
+                status: Some(proto::common::job_status::Status::Pending(
+                    proto::common::job_status::Pending {},
+                )),
+            },
+            JobStatus::Picked => Self {
+                status: Some(proto::common::job_status::Status::Picked(
+                    proto::common::job_status::Picked {},
+                )),
+            },
+            JobStatus::Suceeded => Self {
+                status: Some(proto::common::job_status::Status::Concluded(
+                    proto::common::job_status::Concluded {
+                        conclusion: Some(
+                            proto::common::job_status::concluded::Conclusion::Success(
+                                proto::common::job_status::concluded::Success {},
+                            ),
+                        ),
+                    },
+                )),
+            },
+            JobStatus::Failed => Self {
+                status: Some(proto::common::job_status::Status::Concluded(
+                    proto::common::job_status::Concluded {
+                        conclusion: Some(
+                            proto::common::job_status::concluded::Conclusion::Failure(
+                                proto::common::job_status::concluded::Failure {},
+                            ),
+                        ),
+                    },
+                )),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobWithStatus {
+    pub job: Job,
+    pub status: JobStatus,
+}
+
+impl From<JobWithStatus> for proto::common::JobWithStatus {
+    fn from(value: JobWithStatus) -> Self {
+        Self {
+            status: Some(value.status.into()),
+            job: Some(value.job.into()),
         }
     }
 }

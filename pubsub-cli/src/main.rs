@@ -81,10 +81,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         }
-        cli::Command::ListJobs { page, count } => {
-            let (jobs, total) = client.list_jobs(page, count).await?;
+        cli::Command::ListJobs {
+            page,
+            count,
+            filter,
+        } => {
+            let (jobs, total) = client.list_jobs(page, count, filter).await?;
 
-            println!("total: {}", total);
+            // println!("total: {}", total);
             for job in jobs {
                 println!("{}", serde_json::to_string(&job)?);
             }
