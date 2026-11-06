@@ -447,10 +447,12 @@ impl PubSubClient for PubSubService {
                     if concluded_job_notification.job_uuid == job_uuid {
                         result
                             .set(proto::client::WaitJobResponse {
-                                job_status: Some(proto::common::JobStatus {
-                                    result: Some(proto::common::job_status::Result::Success(
-                                        proto::common::job_status::Success {},
-                                    )),
+                                job_status: Some(proto::common::job_status::Concluded {
+                                    conclusion: Some(
+                                        proto::common::job_status::concluded::Conclusion::Success(
+                                            proto::common::job_status::concluded::Success {},
+                                        ),
+                                    ),
                                 }),
                             })
                             .unwrap();
@@ -485,6 +487,28 @@ impl PubSubClient for PubSubService {
                 })
             })
             .map_err(Into::into)
+    }
+
+    async fn list_jobs_with_status(
+        &self,
+        request: Request<proto::client::ListJobsWithStatusRequest>,
+    ) -> Result<Response<proto::client::ListJobsWithStatusResponse>, Status> {
+        todo!()
+        // let mut conn = self.db_connector.get().await?;
+        // let page = request.get_ref().page;
+        // let count = request.get_ref().count;
+
+        // log::info!("client listing jobs");
+
+        // db_connector::get_jobs(&mut conn, page as i64, count as i64)
+        //     .await
+        //     .map(|(jobs, total)| {
+        //         Response::new(proto::client::ListJobsResponse {
+        //             jobs: jobs.into_iter().map(Into::into).collect(),
+        //             total: total as i32,
+        //         })
+        //     })
+        //     .map_err(Into::into)
     }
 
     async fn list_builders(

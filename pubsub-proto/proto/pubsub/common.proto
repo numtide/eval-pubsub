@@ -29,6 +29,11 @@ message Job {
   AnonymousJob anonymous_job = 2;
 }
 
+message JobWithStatus {
+  Job job = 1;
+  JobStatus status = 2;
+}
+
 message UUID {
   fixed64 hi = 1;
   fixed64 lo = 2;
@@ -68,17 +73,31 @@ message EvalResult {
   repeated Attr attrs = 1;
 }
 
+
+
 message JobStatus {
-  message Success {
+  message Pending {
 
   }
-
-  message Failure {
+  message Picked {
 
   }
+  message Concluded {
+    message Success {
 
-  oneof result {
-    Success success = 2;
-    Failure failure = 3;
+    }
+    message Failure {
+
+    }
+    oneof conclusion {
+      Success success = 1;
+      Failure failure = 2;
+    }
+  }
+
+  oneof status {
+    Pending pending = 1;
+    Picked picked = 2;
+    Concluded concluded = 3;
   }
 }
