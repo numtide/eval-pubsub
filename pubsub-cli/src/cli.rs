@@ -1,18 +1,33 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use pubsub_client::AnonymousJob;
 use uuid::Uuid;
 
-fn parse_anonymous_jobs(val: &str) -> Result<AnonymousJob, String> {
-    let rules = serde_json::from_str(val).map_err(|e| e.to_string())?;
-    Ok(rules)
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum Data {
+    Inline { anonymous_job: AnonymousJob },
+    File { filepath: PathBuf },
+}
+
+fn parse_anonymous_jobs(val: &str) -> Result<Data, String> {
+    if let Some(char) = val.chars().nth(0)
+        && char == '@'
+    {
+        Ok(Data::File {
+            filepath: PathBuf::from(val.chars().skip(1).collect::<String>()),
+        })
+    } else {
+        Ok(Data::Inline {
+            anonymous_job: serde_json::from_str(val).map_err(|e| e.to_string())?,
+        })
+    }
 }
 
 #[derive(clap::Subcommand, PartialEq, Eq, Clone, Debug)]
 pub enum Command {
     SubmitJobs {
         #[arg(value_parser=parse_anonymous_jobs)]
-        jobs: Vec<AnonymousJob>,
+        jobs: Vec<Data>,
     },
     TailJobs {
         jobs: Vec<Uuid>,

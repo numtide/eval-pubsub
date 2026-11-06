@@ -1,4 +1,7 @@
-use std::io::stdout;
+use std::{
+    fs::File,
+    io::{BufReader, stdout},
+};
 
 use clap::Parser as _;
 use futures::StreamExt as _;
@@ -25,9 +28,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         cli::Command::SubmitJobs { jobs } => {
-            log::info!("submitting {} jobs", jobs.len());
-            let mut uuids = Vec::with_capacity(jobs.len());
+            let mut jobs2 = Vec::with_capacity(jobs.len());
+
             for job in jobs {
+                match job {
+                    cli::Data::Inline { anonymous_job } => jobs2.push(anonymous_job),
+                    cli::Data::File { filepath } => {
+                        jobs2.push(serde_json::from_reader(File::open(filepath)?)?)
+                    }
+                }
+            }
+
+            log::info!("submitting {} jobs", jobs2.len());
+            let mut uuids = Vec::with_capacity(jobs2.len());
+            for job in jobs2 {
                 uuids.push(client.submit_job(job).await?);
             }
             for uuid in uuids {

@@ -25,7 +25,7 @@ with subtest("builder registers and subscribes"):
     assert builders[0]["active"], "builde isn't active"
 
 with subtest("client submits an eval job"):
-    submitter.succeed(f'{__pubsub_cli} --endpoint http://localhost:10000 submit-jobs "$(cat {__submit_job})"')
+    submitter.succeed(f'{__pubsub_cli} --endpoint http://localhost:10000 submit-jobs "@{__submit_job}"')
 
 with subtest("builder evaluates and concludes the job"):
     submitter.wait_until_succeeds(
