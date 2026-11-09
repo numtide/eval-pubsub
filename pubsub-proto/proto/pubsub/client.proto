@@ -8,6 +8,7 @@ service PubSubClient {
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse) {}
   rpc TailJob(TailJobRequest) returns (stream TailJobResponse) {}
   rpc WaitJob(WaitJobRequest) returns (stream WaitJobResponse) {}
+  rpc GetJobs(GetJobsRequest) returns (GetJobsResponse) {}
 
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse) {}
   rpc ListBuilders(ListBuildersRequest) returns (ListBuildersResponse) {}
@@ -70,4 +71,13 @@ message ListBuildersRequest {
 message ListBuildersResponse {
   repeated common.Builder builders = 1;
   int32 total = 2;
+}
+
+
+message GetJobsRequest {
+  repeated common.UUID job_uuids = 1;
+}
+
+message GetJobsResponse {
+  repeated common.JobWithStatus jobs = 1;
 }

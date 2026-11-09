@@ -18,6 +18,7 @@ use diesel_async::{
     },
 };
 use diesel_migrations::MigrationHarness as _;
+use itertools::Itertools;
 use tokio::sync::RwLock;
 use tokio_postgres::{Client, NoTls};
 use tokio_stream::StreamExt as _;
@@ -99,21 +100,42 @@ pub async fn get_job(
         })
 }
 
-pub async fn get_jobs(
+pub enum GetJobsFilter<'a> {
+    StatusFilter(models::JobFilter),
+    UuidFilter(&'a [Uuid]),
+}
+
+pub async fn get_jobs<'a>(
     conn: &mut Object<AsyncPgConnection>,
-    page: i64,
-    count: i64,
-    filter: Option<models::JobFilter>,
+    page_and_count: Option<(i64, i64)>,
+    filter: Option<GetJobsFilter<'a>>,
 ) -> Result<(Vec<models::JobWithStatus>, i64), SubmitterError> {
-    conn.transaction(async |conn| match filter {
-        Some(models::JobFilter::Pending) => todo!(),
-        Some(models::JobFilter::Picked) => todo!(),
-        Some(models::JobFilter::Suceeded) => todo!(),
-        Some(models::JobFilter::Failed) => todo!(),
-        None => {
-            let jobs = sql_query(
-                "SELECT
-                   *,
+    conn.transaction(async |conn| {
+        let filter_string: Option<String> = match filter {
+            None => None,
+            Some(GetJobsFilter::StatusFilter(status_filter)) => match status_filter {
+                models::JobFilter::Pending => Some(String::from("WHERE pending = true")),
+                models::JobFilter::Picked => Some(String::from("WHERE picked = true")),
+                models::JobFilter::Suceeded | models::JobFilter::Failed => {
+                    log::warn!("for now no distinction between failed and succeeded job filters");
+                    Some(String::from("WHERE concluded = true"))
+                }
+            },
+            Some(GetJobsFilter::UuidFilter(uuids)) => {
+                let separator = ", ".to_string();
+                Some(format!(
+                    "WHERE id IN {{ {} }}",
+                    (1..=uuids.len())
+                        .into_iter()
+                        .map(|n| format!("${}", n))
+                        .intersperse(separator)
+                        .collect::<String>()
+                ))
+            }
+        };
+        let mut expr = sql_query(format!(
+            "SELECT
+                   eval_job.*,
                    EXISTS (
                      SELECT 1
                      FROM pending_eval_job
@@ -128,56 +150,45 @@ pub async fn get_jobs(
                      SELECT 1
                      FROM picked_eval_job
                      WHERE picked_eval_job.id = eval_job.id
-                   ) as picked
+                   ) as picked,
+                   concluded_eval_job.builder_id as concluded_builder_uuid
                    FROM eval_job
+                   eval_job LEFT JOIN concluded_eval_job ON eval_job.id = concluded_eval_job.id
                    OFFSET $1
-                   LIMIT $2;
+                   LIMIT $2
+                   {};
                 ",
-            )
-            .bind::<sql_types::BigInt, _>(page * count)
-            .bind::<sql_types::BigInt, _>(count)
+            if let Some(filter_string) = filter_string {
+                filter_string
+            } else {
+                String::from("")
+            }
+        ))
+        .into_boxed();
+
+        if let Some(page_and_count) = page_and_count {
+            let (page, count) = page_and_count;
+            expr = expr.bind::<sql_types::BigInt, _>(page * count);
+            expr = expr.bind::<sql_types::BigInt, _>(count);
+        }
+
+        match filter {
+            Some(GetJobsFilter::UuidFilter(uuids)) => {
+                for uuid in uuids {
+                    expr = expr.bind::<sql_types::Uuid, _>(uuid);
+                }
+            }
+            _ => {}
+        };
+
+        let jobs = expr
             .load::<db::models::EvalJobWithStatus>(conn)
             .await?
             .into_iter()
             .map(TryInto::try_into)
             .collect::<Result<Vec<_>, _>>()?;
 
-            // let binders = (0..uuids.len())
-            //     .map(|idx| format!("(${}::uuid)", idx + 1))
-            //     .collect::<String>();
-
-            // sql_query(
-            //     "SELECT
-            //        id,
-            //        EXISTS (
-            //          SELECT 1
-            //          FROM pending_eval_job
-            //          WHERE pending_eval_job.id = eval_job.id
-            //        ) AS pending,
-            //        EXISTS (
-            //          SELECT 1
-            //          FROM concluded_eval_job
-            //          WHERE concluded_eval_job.id = eval_job.id
-            //        ) AS concluded,
-            //        EXISTS (
-            //          SELECT 1
-            //          FROM picked_eval_job
-            //          WHERE picked_eval_job.id = eval_job.id
-            //        ) as picked from eval_job
-            //        WHERE id = any (
-            //          SELECT subset.uuid
-            //          FROM (
-            //            VALUES
-            //              ('00000000-0000-0000-0000-000000000000'::uuid),
-            //              ('00000000-0000-0000-0000-000000000001'),
-            //              ('00000000-0000-0000-0000-000000000002')
-            //          ) as subset (uuid)
-            //        );
-            //     ",
-            // );
-
-            Ok((jobs, 0))
-        }
+        Ok((jobs, 0))
     })
     .await
 }
@@ -295,6 +306,20 @@ pub async fn take_picked_job(
         .await
         .optional()
         .map(|picked_job| picked_job.map(Into::into))
+        .map_err(Into::into)
+}
+
+pub async fn get_concluded_job(
+    conn: &mut Object<AsyncPgConnection>,
+    uuid: Uuid,
+) -> Result<Option<models::ConcludedJob>, SubmitterError> {
+    concluded_eval_job::dsl::concluded_eval_job
+        .filter(concluded_eval_job::dsl::id.eq(uuid))
+        .select(db::models::ConcludedEvalJob::as_select())
+        .first(conn)
+        .await
+        .optional()
+        .map(|concluded_job| concluded_job.map(Into::into))
         .map_err(Into::into)
 }
 

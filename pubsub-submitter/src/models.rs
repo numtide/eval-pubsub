@@ -73,8 +73,8 @@ impl BuildJob {
 pub enum JobStatus {
     Pending,
     Picked,
-    Suceeded,
-    Failed,
+    Suceeded { builder_uuid: Uuid },
+    Failed { builder_uuid: Uuid },
 }
 
 impl From<JobStatus> for proto::common::JobStatus {
@@ -90,23 +90,27 @@ impl From<JobStatus> for proto::common::JobStatus {
                     proto::common::job_status::Picked {},
                 )),
             },
-            JobStatus::Suceeded => Self {
+            JobStatus::Suceeded { builder_uuid } => Self {
                 status: Some(proto::common::job_status::Status::Concluded(
                     proto::common::job_status::Concluded {
                         conclusion: Some(
                             proto::common::job_status::concluded::Conclusion::Success(
-                                proto::common::job_status::concluded::Success {},
+                                proto::common::job_status::concluded::Success {
+                                    builder_uuid: Some(builder_uuid.into()),
+                                },
                             ),
                         ),
                     },
                 )),
             },
-            JobStatus::Failed => Self {
+            JobStatus::Failed { builder_uuid } => Self {
                 status: Some(proto::common::job_status::Status::Concluded(
                     proto::common::job_status::Concluded {
                         conclusion: Some(
                             proto::common::job_status::concluded::Conclusion::Failure(
-                                proto::common::job_status::concluded::Failure {},
+                                proto::common::job_status::concluded::Failure {
+                                    builder_uuid: Some(builder_uuid.into()),
+                                },
                             ),
                         ),
                     },
@@ -380,6 +384,17 @@ pub struct PickedJob {
 }
 
 impl PickedJob {
+    pub fn new(id: Uuid, builder_id: Uuid) -> Self {
+        Self { id, builder_id }
+    }
+}
+
+pub struct ConcludedJob {
+    pub id: Uuid,
+    pub builder_id: Uuid,
+}
+
+impl ConcludedJob {
     pub fn new(id: Uuid, builder_id: Uuid) -> Self {
         Self { id, builder_id }
     }

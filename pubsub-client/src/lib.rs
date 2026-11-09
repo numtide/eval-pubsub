@@ -53,8 +53,8 @@ impl TryFrom<JobFilter> for client::list_jobs_request::Filter {
 pub enum JobStatus {
     Pending,
     Picked,
-    Failed,
-    Succeeded,
+    Failed { builder_uuid: Uuid },
+    Succeeded { builder_uuid: Uuid },
 }
 
 impl TryFrom<common::JobStatus> for JobStatus {
@@ -64,13 +64,7 @@ impl TryFrom<common::JobStatus> for JobStatus {
         match value.status.ok_or(GrpcError::field_missing(&["status"]))? {
             common::job_status::Status::Pending(_) => Ok(JobStatus::Pending),
             common::job_status::Status::Picked(_) => Ok(JobStatus::Picked),
-            common::job_status::Status::Concluded(concluded) => match concluded
-                .conclusion
-                .ok_or(GrpcError::field_missing(&["status", "conclusion"]))?
-            {
-                common::job_status::concluded::Conclusion::Success(_) => Ok(JobStatus::Succeeded),
-                common::job_status::concluded::Conclusion::Failure(_) => Ok(JobStatus::Failed),
-            },
+            common::job_status::Status::Concluded(concluded) => concluded.try_into(),
         }
     }
 }
@@ -81,10 +75,22 @@ impl TryFrom<common::job_status::Concluded> for JobStatus {
     fn try_from(value: common::job_status::Concluded) -> Result<Self, Self::Error> {
         match value
             .conclusion
-            .ok_or(GrpcError::field_missing(&["status", "conclusion"]))?
+            .ok_or(GrpcError::field_missing(&["conclusion"]))?
         {
-            common::job_status::concluded::Conclusion::Success(_) => Ok(JobStatus::Succeeded),
-            common::job_status::concluded::Conclusion::Failure(_) => Ok(JobStatus::Failed),
+            common::job_status::concluded::Conclusion::Success(
+                common::job_status::concluded::Success { builder_uuid },
+            ) => Ok(JobStatus::Succeeded {
+                builder_uuid: builder_uuid
+                    .ok_or(GrpcError::field_missing(&["conclusion", "builder_uuid"]))?
+                    .into(),
+            }),
+            common::job_status::concluded::Conclusion::Failure(
+                common::job_status::concluded::Failure { builder_uuid },
+            ) => Ok(JobStatus::Failed {
+                builder_uuid: builder_uuid
+                    .ok_or(GrpcError::field_missing(&["conclusion", "builder_uuid"]))?
+                    .into(),
+            }),
         }
     }
 }

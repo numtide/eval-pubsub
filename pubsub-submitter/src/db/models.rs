@@ -82,6 +82,20 @@ pub struct ConcludedEvalJob {
     pub builder_id: Uuid,
 }
 
+impl From<models::ConcludedJob> for ConcludedEvalJob {
+    fn from(value: models::ConcludedJob) -> Self {
+        let models::ConcludedJob { id, builder_id } = value;
+        Self { id, builder_id }
+    }
+}
+
+impl From<ConcludedEvalJob> for models::ConcludedJob {
+    fn from(value: ConcludedEvalJob) -> Self {
+        let ConcludedEvalJob { id, builder_id } = value;
+        Self { id, builder_id }
+    }
+}
+
 #[derive(Queryable, Selectable, Debug, Insertable, QueryableByName)]
 #[diesel(table_name = crate::schema::job_output)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -171,6 +185,8 @@ pub struct EvalJobWithStatus {
     pub picked: bool,
     #[diesel(sql_type = diesel::sql_types::Bool)]
     pub concluded: bool,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Uuid>)]
+    pub concluded_builder_uuid: Option<Uuid>,
 }
 
 impl TryFrom<EvalJobWithStatus> for models::JobWithStatus {
@@ -197,7 +213,11 @@ impl TryFrom<EvalJobWithStatus> for models::JobWithStatus {
                 models::JobStatus::Picked
             } else if value.concluded {
                 log::warn!("for now always reporting jobs as succeeded");
-                models::JobStatus::Suceeded
+                models::JobStatus::Suceeded {
+                    builder_uuid: value
+                        .concluded_builder_uuid
+                        .expect("concluded_builder_uuid must be set when a job is concluded"),
+                }
             } else {
                 log::error!(
                     "job {} was neither pending, picked, nor concluded",

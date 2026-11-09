@@ -16,24 +16,20 @@ impl Conclusion {
     pub fn into_request_parts(
         self,
     ) -> (
-        proto::common::job_status::Concluded,
+        proto::server::conclude_job_request::JobStatus,
         Option<proto::server::conclude_job_request::Result>,
     ) {
         match self {
             Self::Success(result) => (
-                proto::common::job_status::Concluded {
-                    conclusion: Some(proto::common::job_status::concluded::Conclusion::Success(
-                        proto::common::job_status::concluded::Success {},
-                    )),
-                },
+                proto::server::conclude_job_request::JobStatus::Success(
+                    proto::server::conclude_job_request::Success {},
+                ),
                 Some(result),
             ),
             Self::Failure(_) => (
-                proto::common::job_status::Concluded {
-                    conclusion: Some(proto::common::job_status::concluded::Conclusion::Failure(
-                        proto::common::job_status::concluded::Failure {},
-                    )),
-                },
+                proto::server::conclude_job_request::JobStatus::Failure(
+                    proto::server::conclude_job_request::Failure {},
+                ),
                 None,
             ),
         }

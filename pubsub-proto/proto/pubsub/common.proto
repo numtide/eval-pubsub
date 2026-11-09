@@ -84,10 +84,10 @@ message JobStatus {
   }
   message Concluded {
     message Success {
-
+      UUID builder_uuid = 1;
     }
     message Failure {
-
+      UUID builder_uuid = 1;
     }
     oneof conclusion {
       Success success = 1;

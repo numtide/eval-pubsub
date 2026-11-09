@@ -22,7 +22,7 @@ use crate::error::ThroughProtocolError;
 use crate::error::{ProtocolError, SubmitterError};
 use crate::models;
 use crate::pubsub::concluded_job_notification::ConcludedJobNotification;
-use crate::pubsub::db_connector::DoContinue;
+use crate::pubsub::db_connector::{DoContinue, GetJobsFilter};
 use crate::pubsub::job_output_notification::JobOutputNotification;
 use crate::pubsub::pending_job_notification::PendingJobNotification;
 use db_connector::DBConnector;
@@ -470,6 +470,7 @@ impl PubSubClient for PubSubService {
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
+        let mut conn = self.db_connector.get().await?;
         let mut conn_notifs = self.db_connector.get().await?;
         let (tx, rx) = mpsc::channel(1);
 
@@ -482,17 +483,26 @@ impl PubSubClient for PubSubService {
                     &mut conn_notifs,
                     async move |concluded_job_notification: ConcludedJobNotification| {
                         if concluded_job_notification.job_uuid == job_uuid {
-                            tx.send(Ok(proto::client::WaitJobResponse {
-                                job_status: Some(proto::common::job_status::Concluded {
-                                    conclusion: Some(
-                                        proto::common::job_status::concluded::Conclusion::Success(
-                                            proto::common::job_status::concluded::Success {},
+                            let concluded_job =
+                                db_connector::get_concluded_job(&mut conn, job_uuid)
+                                    .await
+                                    .unwrap();
+
+                            if let Some(concluded_job) = concluded_job {
+                                tx.send(Ok(proto::client::WaitJobResponse {
+                                    job_status: Some(proto::common::job_status::Concluded {
+                                        conclusion: Some(
+                                            proto::common::job_status::concluded::Conclusion::Success(
+                                                proto::common::job_status::concluded::Success {
+                                                    builder_uuid: Some(concluded_job.builder_id.into())
+                                                },
+                                            ),
                                         ),
-                                    ),
-                                }),
-                            }))
-                            .await
-                            .unwrap();
+                                    }),
+                                }))
+                                .await
+                                .unwrap()
+                            };
                             DoContinue::Stop(Ok(()))
                         } else {
                             DoContinue::Continue
@@ -521,15 +531,19 @@ impl PubSubClient for PubSubService {
 
         log::info!("client listing jobs");
 
-        db_connector::get_jobs(&mut conn, page as i64, count as i64, filter.map(Into::into))
-            .await
-            .map(|(jobs, total)| {
-                Response::new(proto::client::ListJobsResponse {
-                    jobs: jobs.into_iter().map(Into::into).collect(),
-                    total: total as i32,
-                })
+        db_connector::get_jobs(
+            &mut conn,
+            Some((page as i64, count as i64)),
+            filter.map(Into::into).map(GetJobsFilter::StatusFilter),
+        )
+        .await
+        .map(|(jobs, total)| {
+            Response::new(proto::client::ListJobsResponse {
+                jobs: jobs.into_iter().map(Into::into).collect(),
+                total: total as i32,
             })
-            .map_err(Into::into)
+        })
+        .map_err(Into::into)
     }
 
     async fn list_builders(
@@ -551,6 +565,34 @@ impl PubSubClient for PubSubService {
                 })
             })
             .map_err(Into::into)
+    }
+
+    async fn get_jobs(
+        &self,
+        request: Request<proto::client::GetJobsRequest>,
+    ) -> Result<Response<proto::client::GetJobsResponse>, Status> {
+        let mut conn = self.db_connector.get().await?;
+        let uuids = request
+            .get_ref()
+            .job_uuids
+            .iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+
+        log::info!("client getting jobs");
+
+        db_connector::get_jobs(
+            &mut conn,
+            None,
+            Some(GetJobsFilter::UuidFilter(uuids.as_slice())),
+        )
+        .await
+        .map(|(jobs, total)| {
+            Response::new(proto::client::GetJobsResponse {
+                jobs: jobs.into_iter().map(Into::into).collect(),
+            })
+        })
+        .map_err(Into::into)
     }
 }
 

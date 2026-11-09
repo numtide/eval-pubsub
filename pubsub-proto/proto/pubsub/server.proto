@@ -57,10 +57,20 @@ message PickJobResponse {
 }
 
 message ConcludeJobRequest {
+  message Success {
+
+  }
+  message Failure {
+
+  }
+
   common.UUID job_id = 1;
-  common.JobStatus.Concluded job_status = 2;
+  oneof job_status {
+    Success success = 2;
+    Failure failure = 3;
+  }
   oneof result {
-    common.EvalResult eval = 3;
+    common.EvalResult eval = 4;
   }
 }
 
