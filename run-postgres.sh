@@ -41,6 +41,7 @@ function _command_run() {
         umask 0002
 
         cat > "$_postgres_initdb_d/init.sql" <<EOF
+CREATE DATABASE pubsub;
 CREATE ROLE $_user WITH SUPERUSER LOGIN;
 EOF
     )
@@ -53,12 +54,12 @@ EOF
             --log-driver k8s-file \
             --name pubsub-postgres \
             --volume "$_postgres_initdb_d:/docker-entrypoint-initdb.d" \
-            --volume "$_postgres_mount:/run/postgresql" \
+            --volume "$_postgres_mount:/var/run/postgresql" \
             --env POSTGRES_PASSWORD=mysecretpassword \
             docker.io/postgres:18.6-alpine
     )"
 
-    while ! _command_psql --command 'select 1;' -tA > /dev/null 2>&1 ; do
+    while ! _command_psql --command 'select 1;' -tA | ( if [[ "$_trace" = "1" ]] ; then cat ; else cat > /dev/null 2>&1 ; fi ) ; do
         sleep 5
     done
     echo "> postgresql running and available"
