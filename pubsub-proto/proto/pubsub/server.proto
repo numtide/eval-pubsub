@@ -30,7 +30,7 @@ message ListJobsResponse {
 
 message JobOutputRequest {
   common.UUID job_id = 1;
-  repeated string output = 2;
+  repeated common.JobOutput output = 2;
 }
 
 message JobOutputResponse {

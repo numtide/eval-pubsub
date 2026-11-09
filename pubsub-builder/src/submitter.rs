@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use pubsub_proto::pubsub::{self as proto, server::pub_sub_client::PubSubClient};
+use pubsub_proto::pubsub::{
+    self as proto, common::JobOutput, server::pub_sub_client::PubSubClient,
+};
 use tokio::sync::mpsc;
 use tonic::{
     Request, Status, Streaming,
@@ -105,7 +107,11 @@ impl Submitter {
         }
     }
 
-    pub async fn job_output(&self, job_id: Uuid, output: Vec<String>) -> Result<(), BuilderError> {
+    pub async fn job_output(
+        &self,
+        job_id: Uuid,
+        output: Vec<JobOutput>,
+    ) -> Result<(), BuilderError> {
         self.client
             .clone()
             .job_output(proto::server::JobOutputRequest {

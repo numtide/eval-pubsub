@@ -114,50 +114,38 @@ pub async fn get_jobs<'a>(
         let filter_string: Option<String> = match filter {
             None => None,
             Some(GetJobsFilter::StatusFilter(status_filter)) => match status_filter {
-                models::JobFilter::Pending => Some(String::from("WHERE pending = true")),
-                models::JobFilter::Picked => Some(String::from("WHERE picked = true")),
+                models::JobFilter::Pending => {
+                    Some(String::from("WHERE pending_eval_job.id IS NOT NULL"))
+                }
+                models::JobFilter::Picked => {
+                    Some(String::from("WHERE picked_eval_job.id IS NOT NULL"))
+                }
                 models::JobFilter::Suceeded | models::JobFilter::Failed => {
                     log::warn!("for now no distinction between failed and succeeded job filters");
-                    Some(String::from("WHERE concluded = true"))
+                    Some(String::from("WHERE concluded_eval_job.id IS NOT NULL"))
                 }
             },
-            Some(GetJobsFilter::UuidFilter(uuids)) => {
-                let separator = ", ".to_string();
-                Some(format!(
-                    "WHERE id IN {{ {} }}",
-                    (1..=uuids.len())
-                        .into_iter()
-                        .map(|n| format!("${}", n))
-                        .intersperse(separator)
-                        .collect::<String>()
-                ))
+            Some(GetJobsFilter::UuidFilter(_)) => {
+                Some(String::from("WHERE eval_job.id = ANY($1::uuid[])"))
             }
         };
         let mut expr = sql_query(format!(
-            "SELECT
-                   eval_job.*,
-                   EXISTS (
-                     SELECT 1
-                     FROM pending_eval_job
-                     WHERE pending_eval_job.id = eval_job.id
-                   ) AS pending,
-                   EXISTS (
-                     SELECT 1
-                     FROM concluded_eval_job
-                     WHERE concluded_eval_job.id = eval_job.id
-                   ) AS concluded,
-                   EXISTS (
-                     SELECT 1
-                     FROM picked_eval_job
-                     WHERE picked_eval_job.id = eval_job.id
-                   ) as picked,
-                   concluded_eval_job.builder_id as concluded_builder_uuid
-                   FROM eval_job
-                   eval_job LEFT JOIN concluded_eval_job ON eval_job.id = concluded_eval_job.id
-                   OFFSET $1
-                   LIMIT $2
-                   {};
-                ",
+            "
+              SELECT
+                eval_job.*,
+                pending_eval_job.id IS NOT NULL AS pending,
+                concluded_eval_job.id IS NOT NULL AS concluded,
+                picked_eval_job.id IS NOT NULL AS picked,
+                picked_eval_job.builder_id as picked_builder_uuid,
+                concluded_eval_job.builder_id as concluded_builder_uuid
+              FROM eval_job
+                LEFT JOIN pending_eval_job ON eval_job.id = pending_eval_job.id
+                LEFT JOIN picked_eval_job ON eval_job.id = picked_eval_job.id
+                LEFT JOIN concluded_eval_job ON eval_job.id = concluded_eval_job.id
+              {}
+              OFFSET $1
+              LIMIT $2;
+            ",
             if let Some(filter_string) = filter_string {
                 filter_string
             } else {
@@ -174,9 +162,7 @@ pub async fn get_jobs<'a>(
 
         match filter {
             Some(GetJobsFilter::UuidFilter(uuids)) => {
-                for uuid in uuids {
-                    expr = expr.bind::<sql_types::Uuid, _>(uuid);
-                }
+                expr = expr.bind::<sql_types::Array<sql_types::Uuid>, _>(uuids);
             }
             _ => {}
         };

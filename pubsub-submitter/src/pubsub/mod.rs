@@ -11,6 +11,8 @@ use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
 use itertools::Itertools;
 use std::panic;
 use std::sync::Arc;
+use std::time::SystemTime;
+use time::OffsetDateTime;
 use tokio::sync::{Notify, RwLock, SetOnce, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
@@ -293,7 +295,7 @@ impl PubSub for PubSubService {
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
-        let output: &Vec<String> = &request.get_ref().output;
+        let output = &request.get_ref().output;
 
         let mut conn = self.db_connector.get().await.through()?;
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
@@ -301,11 +303,20 @@ impl PubSub for PubSubService {
                 &mut conn,
                 output
                     .into_iter()
-                    .map(|line| db::models::NewJobOutput {
-                        job_id: job_uuid,
-                        line,
+                    .map(|job_output| {
+                        Ok(db::models::NewJobOutput {
+                            job_id: job_uuid,
+                            line: job_output.line.as_str(),
+                            time: job_output
+                                .time
+                                .ok_or(ProtocolError::field_missing(&["output", "time"]))
+                                .map_err(Into::<SubmitterError>::into)
+                                .and_then(|time| {
+                                    TryInto::<SystemTime>::try_into(time).map_err(Into::into)
+                                })?,
+                        })
                     })
-                    .collect::<Vec<_>>(),
+                    .collect::<Result<Vec<_>, SubmitterError>>()?,
             )
             .await?;
             for job_output_id in uuids {
@@ -318,7 +329,7 @@ impl PubSub for PubSubService {
                 job_uuid,
                 output
                     .iter()
-                    .map(|line| format!("- {}", line))
+                    .map(|job_output| format!("- {} at {:?}", job_output.line, job_output.time))
                     .intersperse("\n".to_owned())
                     .collect::<String>()
             );
@@ -441,15 +452,20 @@ impl PubSubClient for PubSubService {
         self.spawn(
             "backfill_job",
             async move {
+                let mut counter = 0;
                 let job_outputs = db_connector::get_job_outputs(&mut conn, job_uuid, end, number);
                 started_backfill.notify_one();
                 for job_output in job_outputs.await.unwrap() {
+                    if log::log_enabled!(log::Level::Debug) {
+                        counter += 1;
+                    }
                     tx.send(Ok(proto::client::TailJobResponse {
                         line: job_output.line,
                     }))
                     .await
-                    .unwrap()
+                    .unwrap();
                 }
+                log::debug!("backfilled {} job outputs for job {}", counter, job_uuid);
             },
             async move {},
         )
@@ -471,50 +487,73 @@ impl PubSubClient for PubSubService {
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
         let mut conn = self.db_connector.get().await?;
+        let conn_listener = self.db_connector.get().await?;
         let mut conn_notifs = self.db_connector.get().await?;
         let (tx, rx) = mpsc::channel(1);
 
         log::info!("client waiting for job with UUID {}", job_uuid);
 
-        self.spawn(
-            "wait_job",
-            async move {
-                db_connector::listen(
-                    &mut conn_notifs,
-                    async move |concluded_job_notification: ConcludedJobNotification| {
-                        if concluded_job_notification.job_uuid == job_uuid {
-                            let concluded_job =
-                                db_connector::get_concluded_job(&mut conn, job_uuid)
-                                    .await
-                                    .unwrap();
+        {
+            let tx = tx.clone();
+            let mut conn = conn_listener;
+            self.spawn(
+                "wait_job",
+                async move {
+                    db_connector::listen(
+                        &mut conn_notifs,
+                        async move |concluded_job_notification: ConcludedJobNotification| {
+                            if concluded_job_notification.job_uuid == job_uuid {
+                                let concluded_job =
+                                    db_connector::get_concluded_job(&mut conn, job_uuid)
+                                        .await
+                                        .unwrap();
 
-                            if let Some(concluded_job) = concluded_job {
-                                tx.send(Ok(proto::client::WaitJobResponse {
-                                    job_status: Some(proto::common::job_status::Concluded {
-                                        conclusion: Some(
-                                            proto::common::job_status::concluded::Conclusion::Success(
-                                                proto::common::job_status::concluded::Success {
-                                                    builder_uuid: Some(concluded_job.builder_id.into())
-                                                },
+                                if let Some(concluded_job) = concluded_job {
+                                    tx.send(Ok(proto::client::WaitJobResponse {
+                                        job_status: Some(proto::common::job_status::Concluded {
+                                            conclusion: Some(
+                                                proto::common::job_status::concluded::Conclusion::Success(
+                                                    proto::common::job_status::concluded::Success {
+                                                        builder_uuid: Some(concluded_job.builder_id.into())
+                                                    },
+                                                ),
                                             ),
-                                        ),
-                                    }),
-                                }))
-                                .await
-                                .unwrap()
-                            };
-                            DoContinue::Stop(Ok(()))
-                        } else {
-                            DoContinue::Continue
-                        }
-                    },
-                )
-                .await
-                .unwrap();
-            },
-            async move {},
-        )
-        .await;
+                                        }),
+                                    }))
+                                    .await
+                                    .unwrap()
+                                };
+                                DoContinue::Stop(Ok(()))
+                            } else {
+                                DoContinue::Continue
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap()
+                },
+                async move {},
+            )
+            .await
+        };
+
+        let already_concluded_job = db_connector::get_concluded_job(&mut conn, job_uuid)
+            .await
+            .unwrap();
+
+        if let Some(concluded_job) = already_concluded_job {
+            tx.send(Ok(proto::client::WaitJobResponse {
+                job_status: Some(proto::common::job_status::Concluded {
+                    conclusion: Some(proto::common::job_status::concluded::Conclusion::Success(
+                        proto::common::job_status::concluded::Success {
+                            builder_uuid: Some(concluded_job.builder_id.into()),
+                        },
+                    )),
+                }),
+            }))
+            .await
+            .unwrap();
+        }
 
         Ok(Response::new(ReceiverStream::new(rx)))
         // Ok(Response::new(*result.get().unwrap()))

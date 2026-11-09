@@ -1,4 +1,4 @@
-use std::io::Write as _;
+use std::{io::Write as _, time::SystemTime};
 
 use diesel::{
     Selectable,
@@ -7,6 +7,7 @@ use diesel::{
     prelude::Insertable,
     serialize::{IsNull, ToSql},
 };
+use time::UtcDateTime;
 use uuid::Uuid;
 
 use crate::{
@@ -110,6 +111,7 @@ pub struct JobOutput {
 pub struct NewJobOutput<'a> {
     pub job_id: Uuid,
     pub line: &'a str,
+    pub time: SystemTime,
 }
 
 #[derive(Queryable, Selectable, Debug, Insertable)]
@@ -187,6 +189,8 @@ pub struct EvalJobWithStatus {
     pub concluded: bool,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Uuid>)]
     pub concluded_builder_uuid: Option<Uuid>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Uuid>)]
+    pub picked_builder_uuid: Option<Uuid>,
 }
 
 impl TryFrom<EvalJobWithStatus> for models::JobWithStatus {

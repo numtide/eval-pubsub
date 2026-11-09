@@ -27,8 +27,8 @@ fn parse_job_filter(val: &str) -> Result<JobFilter, String> {
     match val {
         "pending" => Ok(JobFilter::Pending),
         "picked" => Ok(JobFilter::Picked),
-        "Succeeded" => Ok(JobFilter::Succeeded),
-        "Failed" => Ok(JobFilter::Failed),
+        "succeeded" | "success" | "successful" => Ok(JobFilter::Succeeded),
+        "failed" | "failure" => Ok(JobFilter::Failed),
         _ => Err(format!("unknown job filter type: {}", val)),
     }
 }
@@ -54,7 +54,7 @@ pub enum Command {
     ListJobs {
         page: i32,
         count: i32,
-        #[arg(value_parser=parse_job_filter)]
+        #[arg(short, long, value_parser=parse_job_filter)]
         filter: Option<JobFilter>,
     },
     ListBuilders {

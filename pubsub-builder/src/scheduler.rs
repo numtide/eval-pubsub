@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use time::UtcDateTime;
 use tokio::sync::{Semaphore, mpsc};
 
 use crate::{
@@ -59,7 +60,9 @@ async fn run_job(executor: &Executor, offer: Offer) {
     let conclusion = executor.run(offer.job, &output).await;
 
     if let Conclusion::Failure(reason) = &conclusion {
-        output.line(format!("job failed: {}", reason)).await;
+        output
+            .line(format!("job failed: {}", reason), UtcDateTime::now())
+            .await;
     }
 
     match offer.submitter.conclude_job(offer.job_id, conclusion).await {

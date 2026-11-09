@@ -2,6 +2,7 @@ use std::{path::Path, process::Stdio};
 
 use pubsub_proto::pubsub as proto;
 use serde::Deserialize;
+use time::UtcDateTime;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncRead, BufReader},
     process::Command,
@@ -108,15 +109,15 @@ where
     while let Ok(Some(line)) = lines.next_line().await {
         match parse_line(prefix, &line) {
             Ok((attr, error)) => {
-                output.line(summarize(&attr)).await;
+                output.line(summarize(&attr), UtcDateTime::now()).await;
                 for line in error.iter().flat_map(|error| error.lines()) {
-                    output.line(line).await;
+                    output.line(line, UtcDateTime::now()).await;
                 }
                 attrs.push(attr);
             }
             Err(err) => {
                 log::warn!("unparseable nix-eval-jobs output {:?}: {}", line, err);
-                output.line(line).await;
+                output.line(line, UtcDateTime::now()).await;
             }
         }
     }
@@ -131,7 +132,9 @@ where
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        output.line(strip_ansi_escapes(&line)).await;
+        output
+            .line(strip_ansi_escapes(&line), UtcDateTime::now())
+            .await;
     }
 }
 

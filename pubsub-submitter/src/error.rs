@@ -79,6 +79,8 @@ pub enum SubmitterError {
     DatabasePool(#[from] PoolError),
     #[error("database error {0}")]
     Database(#[from] diesel::result::Error),
+    #[error("timestamp error {0}")]
+    Timestamp(#[from] prost_types::TimestampError),
     #[error("unregistered")]
     Unregistered {},
     #[error("serde error {0}")]
@@ -107,6 +109,9 @@ impl From<SubmitterError> for tonic::Status {
             SubmitterError::SerdeError(error) => tonic::Status::internal(error.to_string()),
             SubmitterError::JobOutputNotFound { .. } => tonic::Status::internal(value.to_string()),
             SubmitterError::SysinfoError(error) => tonic::Status::internal(error.to_string()),
+            SubmitterError::Timestamp(timestamp_error) => {
+                tonic::Status::internal(timestamp_error.to_string())
+            }
         }
     }
 }

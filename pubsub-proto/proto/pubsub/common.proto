@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package pubsub.common;
 
+import "google/protobuf/timestamp.proto";
+
 message BuildJob {
   string derivation = 1;
 }
@@ -100,4 +102,9 @@ message JobStatus {
     Picked picked = 2;
     Concluded concluded = 3;
   }
+}
+
+message JobOutput {
+  string line = 1;
+  google.protobuf.Timestamp time = 2;
 }
