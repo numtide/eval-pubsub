@@ -333,15 +333,52 @@ where
 
 pub async fn get_job_output(
     conn: &mut Object<AsyncPgConnection>,
-    uuid: i64,
+    id: i64,
 ) -> Result<Option<db::models::JobOutput>, SubmitterError> {
     job_output::dsl::job_output
-        .filter(job_output::dsl::id.eq(uuid))
+        .filter(job_output::dsl::id.eq(id))
         .select(db::models::JobOutput::as_select())
         .first(conn)
         .await
         .optional()
         .map_err(Into::into)
+}
+
+pub async fn get_job_outputs(
+    conn: &mut Object<AsyncPgConnection>,
+    job_uuid: Uuid,
+    end: bool,
+    number: i64,
+) -> Result<Vec<db::models::JobOutput>, SubmitterError> {
+    if end {
+        sql_query(
+            "
+              SELECT *
+              FROM (
+                SELECT *
+                FROM job_output
+                WHERE job_id = $1
+                ORDER BY time DESC
+                LIMIT $2
+              )
+              ORDER BY time ASC;
+            ",
+        )
+        .bind::<sql_types::Uuid, _>(job_uuid)
+        .bind::<sql_types::BigInt, _>(number)
+        .load::<db::models::JobOutput>(conn)
+        .await
+        .map_err(Into::into)
+    } else {
+        job_output::dsl::job_output
+            .filter(job_output::dsl::job_id.eq(job_uuid))
+            .select(db::models::JobOutput::as_select())
+            .order_by(job_output::dsl::time.asc())
+            .limit(number)
+            .load(conn)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 pub async fn get_builder(

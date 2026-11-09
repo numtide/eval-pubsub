@@ -41,7 +41,7 @@ diesel::table! {
     job_output (id) {
         id -> Int8,
         job_id -> Uuid,
-        time -> Nullable<Timestamp>,
+        time -> Timestamp,
         line -> Text,
     }
 }

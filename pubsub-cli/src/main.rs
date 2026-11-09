@@ -48,15 +48,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", uuid);
             }
         }
-        cli::Command::TailJobs { jobs } => {
+        cli::Command::TailJobs {
+            jobs,
+            follow,
+            end,
+            number,
+        } => {
             log::info!("tailing {} jobs", jobs.len());
             let mut streams = Vec::with_capacity(jobs.len());
 
             for job in jobs {
-                streams.push(client.tail_job(job).await?)
+                streams.push(client.tail_job(job, follow, end, number).await?)
             }
 
+            log::debug!("builtup vector of streams");
             let mut stream = futures::stream::select_all(streams);
+            log::debug!("selected across all of them");
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(line) => println!("{}", line), // TODO can we not use a formatting macro to just not use it?

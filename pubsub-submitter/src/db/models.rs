@@ -82,7 +82,7 @@ pub struct ConcludedEvalJob {
     pub builder_id: Uuid,
 }
 
-#[derive(Queryable, Selectable, Debug, Insertable)]
+#[derive(Queryable, Selectable, Debug, Insertable, QueryableByName)]
 #[diesel(table_name = crate::schema::job_output)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct JobOutput {

@@ -75,6 +75,20 @@ impl TryFrom<common::JobStatus> for JobStatus {
     }
 }
 
+impl TryFrom<common::job_status::Concluded> for JobStatus {
+    type Error = Error;
+
+    fn try_from(value: common::job_status::Concluded) -> Result<Self, Self::Error> {
+        match value
+            .conclusion
+            .ok_or(GrpcError::field_missing(&["status", "conclusion"]))?
+        {
+            common::job_status::concluded::Conclusion::Success(_) => Ok(JobStatus::Succeeded),
+            common::job_status::concluded::Conclusion::Failure(_) => Ok(JobStatus::Failed),
+        }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
 pub enum EvalJob {
     Flake {
@@ -285,11 +299,17 @@ impl Client<Channel> {
     pub async fn tail_job(
         &mut self,
         job_uuid: Uuid,
+        follow: bool,
+        end: bool,
+        number: i64,
     ) -> Result<impl Stream<Item = Result<String, Status>> + use<>, Error> {
         let stream = self
             .tonic_client
             .tail_job(Request::new(client::TailJobRequest {
                 job_id: Some(job_uuid.into()),
+                follow,
+                end,
+                number,
             }))
             .await
             .map_err(Into::<GrpcError>::into)?
@@ -298,7 +318,23 @@ impl Client<Channel> {
         Ok(stream)
     }
     pub async fn wait_job(&mut self, job_uuid: Uuid) -> Result<JobStatus, Error> {
-        todo!()
+        let mut stream = self
+            .tonic_client
+            .wait_job(Request::new(client::WaitJobRequest {
+                job_id: Some(job_uuid.into()),
+            }))
+            .await
+            .map_err(Into::<GrpcError>::into)?
+            .into_inner();
+
+        match stream.next().await {
+            Some(response) => Ok(response
+                .map_err(Into::<GrpcError>::into)?
+                .job_status
+                .ok_or(GrpcError::field_missing(&["job_status"]))?
+                .try_into()?),
+            None => todo!(),
+        }
     }
     pub async fn list_jobs(
         &mut self,

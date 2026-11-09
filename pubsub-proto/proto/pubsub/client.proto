@@ -7,7 +7,7 @@ import "common.proto";
 service PubSubClient {
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse) {}
   rpc TailJob(TailJobRequest) returns (stream TailJobResponse) {}
-  rpc WaitJob(WaitJobRequest) returns (WaitJobResponse) {}
+  rpc WaitJob(WaitJobRequest) returns (stream WaitJobResponse) {}
 
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse) {}
   rpc ListBuilders(ListBuildersRequest) returns (ListBuildersResponse) {}
@@ -23,6 +23,9 @@ message SubmitJobResponse {
 
 message TailJobRequest {
   common.UUID job_id = 1;
+  bool follow = 2;
+  bool end = 3;
+  int64 number = 4;
 }
 
 message TailJobResponse {

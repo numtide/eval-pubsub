@@ -41,6 +41,12 @@ pub enum Command {
     },
     TailJobs {
         jobs: Vec<Uuid>,
+        #[arg(short, long)]
+        follow: bool,
+        #[arg(short, long)]
+        end: bool,
+        #[arg(short, long, default_value_t = 2000)]
+        number: i64,
     },
     WaitJobs {
         jobs: Vec<Uuid>,

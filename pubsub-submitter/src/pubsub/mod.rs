@@ -11,7 +11,7 @@ use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
 use itertools::Itertools;
 use std::panic;
 use std::sync::Arc;
-use tokio::sync::{RwLock, SetOnce, mpsc};
+use tokio::sync::{Notify, RwLock, SetOnce, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -334,6 +334,7 @@ impl PubSub for PubSubService {
 #[tonic::async_trait]
 impl PubSubClient for PubSubService {
     type TailJobStream = ReceiverStream<Result<proto::client::TailJobResponse, Status>>;
+    type WaitJobStream = ReceiverStream<Result<proto::client::WaitJobResponse, Status>>;
 
     async fn submit_job(
         &self,
@@ -363,63 +364,98 @@ impl PubSubClient for PubSubService {
     ) -> Result<Response<Self::TailJobStream>, Status> {
         let mut conn = self.db_connector.get().await?;
         let mut conn_notifs = self.db_connector.get().await?;
-        let job_uuid: Uuid = request
+        let job_uuid = request
             .get_ref()
             .job_id
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
+        let end = request.get_ref().end;
+        let number = request.get_ref().number;
+        let follow = request.get_ref().follow;
 
         let (tx, rx) = mpsc::channel(1);
+        let done_with_backfill = Arc::new(Notify::new());
+        let started_backfill = Arc::new(Notify::new());
 
         log::info!("client tailing job with UUID {}", job_uuid);
 
-        self.spawn(
-            "tail_job",
-            async move {
-                db_connector::listen(
-                    &mut conn_notifs,
-                    async move |job_output_notification: JobOutputNotification| {
-                        if job_output_notification.job_uuid == job_uuid {
-                            match db_connector::get_job_output(
-                                &mut conn,
-                                job_output_notification.job_output_id,
-                            )
-                            .await
-                            .unwrap()
-                            {
-                                Some(job_output) => {
-                                    log::trace!(
-                                        "sending job output {:?} for joib with UUID {}",
-                                        job_output,
-                                        job_uuid
-                                    );
-                                    tx.send(Ok(proto::client::TailJobResponse {
-                                        line: job_output.line,
-                                    }))
+        if follow {
+            self.spawn(
+                "tail_job",
+                {
+                    let mut conn = self.db_connector.get().await?;
+                    let tx = tx.clone();
+                    let done_with_backfill = done_with_backfill.clone();
+                    let started_backfill = started_backfill.clone();
+                    async move {
+                        started_backfill.notified().await;
+                        db_connector::listen(
+                            &mut conn_notifs,
+                            async move |job_output_notification: JobOutputNotification| {
+                                done_with_backfill.notified().await;
+                                if job_output_notification.job_uuid == job_uuid {
+                                    match db_connector::get_job_output(
+                                        &mut conn,
+                                        job_output_notification.job_output_id,
+                                    )
                                     .await
-                                    .unwrap();
-                                }
-                                None => {
-                                    tx.send(Err(SubmitterError::JobOutputNotFound {
-                                        job_output_id: job_output_notification.job_output_id,
+                                    .unwrap()
+                                    {
+                                        Some(job_output) => {
+                                            log::trace!(
+                                                "sending job output {:?} for joib with UUID {}",
+                                                job_output,
+                                                job_uuid
+                                            );
+                                            tx.send(Ok(proto::client::TailJobResponse {
+                                                line: job_output.line,
+                                            }))
+                                            .await
+                                            .unwrap();
+                                        }
+                                        None => {
+                                            tx.send(Err(SubmitterError::JobOutputNotFound {
+                                                job_output_id: job_output_notification
+                                                    .job_output_id,
+                                            }
+                                            .into()))
+                                                .await
+                                                .unwrap();
+                                        }
                                     }
-                                    .into()))
-                                        .await
-                                        .unwrap();
                                 }
-                            }
-                        }
 
-                        DoContinue::Continue
-                    },
-                )
-                .await
-                .unwrap()
+                                DoContinue::Continue
+                            },
+                        )
+                        .await
+                        .unwrap()
+                    }
+                },
+                async move {},
+            )
+            .await;
+        }
+
+        self.spawn(
+            "backfill_job",
+            async move {
+                let job_outputs = db_connector::get_job_outputs(&mut conn, job_uuid, end, number);
+                started_backfill.notify_one();
+                for job_output in job_outputs.await.unwrap() {
+                    tx.send(Ok(proto::client::TailJobResponse {
+                        line: job_output.line,
+                    }))
+                    .await
+                    .unwrap()
+                }
             },
             async move {},
         )
         .await;
+
+        done_with_backfill.notify_one();
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -427,26 +463,26 @@ impl PubSubClient for PubSubService {
     async fn wait_job(
         &self,
         request: Request<proto::client::WaitJobRequest>,
-    ) -> Result<Response<proto::client::WaitJobResponse>, Status> {
+    ) -> Result<Response<Self::WaitJobStream>, Status> {
         let job_uuid: Uuid = request
             .get_ref()
             .job_id
             .as_ref()
             .ok_or(ProtocolError::field_missing(&["job_id"]))?
             .into();
-        let result = Arc::new(SetOnce::new());
         let mut conn_notifs = self.db_connector.get().await?;
+        let (tx, rx) = mpsc::channel(1);
 
         log::info!("client waiting for job with UUID {}", job_uuid);
 
-        {
-            let result = result.clone();
-            db_connector::listen(
-                &mut conn_notifs,
-                async move |concluded_job_notification: ConcludedJobNotification| {
-                    if concluded_job_notification.job_uuid == job_uuid {
-                        result
-                            .set(proto::client::WaitJobResponse {
+        self.spawn(
+            "wait_job",
+            async move {
+                db_connector::listen(
+                    &mut conn_notifs,
+                    async move |concluded_job_notification: ConcludedJobNotification| {
+                        if concluded_job_notification.job_uuid == job_uuid {
+                            tx.send(Ok(proto::client::WaitJobResponse {
                                 job_status: Some(proto::common::job_status::Concluded {
                                     conclusion: Some(
                                         proto::common::job_status::concluded::Conclusion::Success(
@@ -454,18 +490,24 @@ impl PubSubClient for PubSubService {
                                         ),
                                     ),
                                 }),
-                            })
+                            }))
+                            .await
                             .unwrap();
-                        DoContinue::Stop(Ok(()))
-                    } else {
-                        DoContinue::Continue
-                    }
-                },
-            )
-            .await?;
-        }
+                            DoContinue::Stop(Ok(()))
+                        } else {
+                            DoContinue::Continue
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            },
+            async move {},
+        )
+        .await;
 
-        Ok(Response::new(*result.get().unwrap()))
+        Ok(Response::new(ReceiverStream::new(rx)))
+        // Ok(Response::new(*result.get().unwrap()))
     }
 
     async fn list_jobs(
