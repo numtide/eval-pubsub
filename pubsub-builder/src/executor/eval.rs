@@ -121,18 +121,14 @@ async fn evaluate(
         .arg(installable)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .map_err(|err| format!("failed to start {}: {}", nix_eval_jobs.display(), err))?;
 
     let stdout = child.stdout.take().expect("stdout is piped");
-    let stderr = child.stderr.take().expect("stderr is piped");
 
-    let (attrs, ()) = tokio::join!(
-        collect_attrs(stdout, prefix, output),
-        forward_lines(stderr, output)
-    );
+    let attrs = collect_attrs(stdout, prefix, output).await;
 
     let status = child
         .wait()
@@ -161,6 +157,7 @@ where
     let mut attrs = Vec::new();
 
     while let Ok(Some(line)) = lines.next_line().await {
+        println!("{}", line);
         match parse_line(prefix, &line) {
             Ok((attr, error)) => {
                 output.line(summarize(&attr), UtcDateTime::now()).await;

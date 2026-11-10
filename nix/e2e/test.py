@@ -67,7 +67,8 @@ with subtest("job output carries evaluation results and errors"):
     output = submitter.succeed(f"{__pubsub_cli} --endpoint http://localhost:10000 tail-jobs --end {job_uuid_pre}")
     print(output)
     output = list(map(lambda str: str.strip(), output.splitlines()))
-    assert len(output) == 20
+    print(len(output))
+    assert len(output) == 11
     assert f"evaluated evalJobs.hello: {__hello_drv_path}" in output
     assert "failed to evaluate evalJobs.broken:" in output
     assert "error: boom" in output
@@ -75,7 +76,7 @@ with subtest("job output carries evaluation results and errors"):
     output = submitter.succeed(f"{__pubsub_cli} --endpoint http://localhost:10000 tail-jobs --end {job_uuid_post}")
     print(output)
     output = list(map(lambda str: str.strip(), output.splitlines()))
-    assert len(output) == 20
+    assert len(output) == 11
     assert f"evaluated evalJobs.hello: {__hello_drv_path}" in output
     assert "failed to evaluate evalJobs.broken:" in output
     assert "error: boom" in output

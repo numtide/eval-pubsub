@@ -559,7 +559,6 @@ impl PubSubClient for PubSubService {
         }
 
         Ok(Response::new(ReceiverStream::new(rx)))
-        // Ok(Response::new(*result.get().unwrap()))
     }
 
     async fn list_jobs(
