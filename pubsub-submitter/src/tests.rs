@@ -1,7 +1,8 @@
 use std::{
+    collections::HashMap,
     str::FromStr as _,
     sync::{Arc, LazyLock},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use axum::response::IntoResponse;
@@ -459,9 +460,12 @@ async fn end_to_end() {
                     tokio::join!(
                         async {
                             let tail_job_response = client_client
-                                .tail_job(Request::new(proto::client::TailJobRequest {
-                                    job_id: job_1.job_id,
-                                }))
+                            .tail_job(Request::new(proto::client::TailJobRequest {
+                                job_id: job_1.job_id,
+                                follow: true,
+                                end: false,
+                                number: 10
+                            }))
                                 .await
                                 .unwrap();
                             let job_output_stream = tail_job_response.into_inner();
@@ -504,7 +508,10 @@ async fn end_to_end() {
                                         "done!",
                                     ]
                                     .into_iter()
-                                    .map(ToOwned::to_owned)
+                                    .map(|line| proto::common::JobOutput {
+                                        line: line.to_owned(),
+                                        time: Some(SystemTime::now().into())
+                                    })
                                     .collect(),
                                 }))
                                 .await
@@ -525,11 +532,9 @@ async fn end_to_end() {
                             match client
                                 .conclude_job(Request::new(proto::server::ConcludeJobRequest {
                                     job_id: job_1.job_id,
-                                    job_status: Some(proto::common::job_status::Concluded {
-                                        conclusion: Some(proto::common::job_status::concluded::Conclusion::Success(
-                                            proto::common::job_status::concluded::Success {}
-                                        ))
-                                    }),
+                                    job_status: Some(proto::server::conclude_job_request::JobStatus::Success (
+                                        proto::server::conclude_job_request::Success {}
+                                    )),
                                     result: Some(proto::server::conclude_job_request::Result::Eval(
                                         proto::common::EvalResult {
                                             attrs: vec![proto::common::eval_result::Attr {
@@ -537,8 +542,11 @@ async fn end_to_end() {
                                                 result: Some(
                                                     proto::common::eval_result::attr::Result::Derivation(
                                                         proto::common::eval_result::Derivation {
-                                                            drv_path: "/nix/store/00000000000000000000000000000000-hello.drv".into(),
+                                                            drv_path:"/nix/store/00000000000000000000000000000000-hello.drv".into(),
                                                             system: "x86_64-linux".into(),
+                                                            outputs: HashMap::new(),
+                                                            required_system_features: Vec::new(),
+                                                            store_dir: "/nix/store".into()
                                                         },
                                                     ),
                                                 ),

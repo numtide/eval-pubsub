@@ -1,4 +1,4 @@
-use std::{path::Path, process::Stdio};
+use std::{collections::HashMap, path::Path, process::Stdio};
 
 use pubsub_proto::pubsub as proto;
 use serde::Deserialize;
@@ -13,11 +13,65 @@ use crate::output::OutputSink;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct NixEvalJobsLine {
+struct NixEvalJobsLineWeak {
     attr_path: Vec<String>,
     drv_path: Option<String>,
     system: Option<String>,
+    outputs: Option<HashMap<String, String>>,
+    required_system_features: Option<Vec<String>>,
+    store_dir: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug)]
+enum NixEvalJobsLine {
+    Success {
+        attr_path: Vec<String>,
+        drv_path: String,
+        system: String,
+        outputs: HashMap<String, String>,
+        required_system_features: Vec<String>,
+        store_dir: String,
+    },
+    Failure {
+        attr_path: Vec<String>,
+        error: String,
+    },
+}
+
+impl TryFrom<NixEvalJobsLineWeak> for NixEvalJobsLine {
+    type Error = Vec<String>;
+
+    fn try_from(value: NixEvalJobsLineWeak) -> Result<Self, Self::Error> {
+        match value {
+            NixEvalJobsLineWeak {
+                attr_path,
+                drv_path: Some(drv_path),
+                system: Some(system),
+                outputs: Some(outputs),
+                required_system_features: Some(required_system_features),
+                store_dir: Some(store_dir),
+                error: _,
+            } => Ok(NixEvalJobsLine::Success {
+                attr_path,
+                drv_path,
+                system,
+                outputs,
+                required_system_features,
+                store_dir,
+            }),
+            NixEvalJobsLineWeak {
+                attr_path,
+                drv_path: _,
+                system: _,
+                outputs: _,
+                required_system_features: _,
+                store_dir: _,
+                error: Some(error),
+            } => Ok(NixEvalJobsLine::Failure { attr_path, error }),
+            NixEvalJobsLineWeak { attr_path, .. } => Err(attr_path),
+        }
+    }
 }
 
 pub async fn run(
@@ -138,6 +192,7 @@ where
     }
 }
 
+// TODO I don't think we should do this here, that's the responsibility of the presentation layer, not the builder
 fn strip_ansi_escapes(line: &str) -> String {
     let mut stripped = String::with_capacity(line.len());
     let mut chars = line.chars();
@@ -159,23 +214,37 @@ fn parse_line(
     prefix: &[String],
     line: &str,
 ) -> Result<(proto::common::eval_result::Attr, Option<String>), serde_json::Error> {
-    let line: NixEvalJobsLine = serde_json::from_str(line)?;
+    let line = serde_json::from_str::<NixEvalJobsLineWeak>(line)?.try_into();
 
-    let (result, error) = match (line.error, line.drv_path) {
-        (Some(error), _) => (
-            proto::common::eval_result::attr::Result::Failed(proto::common::eval_result::Failed {}),
-            Some(error),
-        ),
-        (None, Some(drv_path)) => (
+    let (attr_path, result, error) = match line {
+        Ok(NixEvalJobsLine::Success {
+            attr_path,
+            drv_path,
+            system,
+            outputs,
+            required_system_features,
+            store_dir,
+        }) => (
+            attr_path,
             proto::common::eval_result::attr::Result::Derivation(
                 proto::common::eval_result::Derivation {
                     drv_path,
-                    system: line.system.unwrap_or_default(),
+                    // TODO can system be null/missing?
+                    system,
+                    outputs,
+                    required_system_features,
+                    store_dir,
                 },
             ),
             None,
         ),
-        (None, None) => (
+        Ok(NixEvalJobsLine::Failure { attr_path, error }) => (
+            attr_path,
+            proto::common::eval_result::attr::Result::Failed(proto::common::eval_result::Failed {}),
+            Some(error),
+        ),
+        Err(attr_path) => (
+            attr_path,
             proto::common::eval_result::attr::Result::Failed(proto::common::eval_result::Failed {}),
             Some("nix-eval-jobs returned neither a derivation nor an error".to_owned()),
         ),
@@ -183,7 +252,7 @@ fn parse_line(
 
     Ok((
         proto::common::eval_result::Attr {
-            attr_path: prefix.iter().cloned().chain(line.attr_path).collect(),
+            attr_path: prefix.iter().cloned().chain(attr_path).collect(),
             result: Some(result),
         },
         error,
@@ -212,16 +281,33 @@ mod tests {
     fn parse_derivation() {
         let (attr, error) = parse_line(
             &["evalJobs".to_owned()],
-            r#"{"attr":"hello","attrPath":["hello"],"drvPath":"/nix/store/x-hello.drv","system":"x86_64-linux"}"#,
+            r#"{
+                 "attr": "hello",
+                 "attrPath": [ "hello" ],
+                 "drvPath": "/nix/store/x-hello.drv",
+                 "system":"x86_64-linux",
+                 "outputs": {
+                   "out": "/nix/store/x-hello"
+                 },
+                 "requiredSystemFeatures": [
+                   "kvm",
+                   "nixos-test"
+                 ],
+                 "storeDir": "/nix/store"
+               }"#,
         )
         .unwrap();
 
+        assert_eq!(error, None);
         assert_eq!(attr.attr_path, ["evalJobs", "hello"]);
         assert_eq!(
             attr.result,
             Some(AttrResult::Derivation(Derivation {
                 drv_path: "/nix/store/x-hello.drv".to_owned(),
                 system: "x86_64-linux".to_owned(),
+                outputs: HashMap::from([("out".to_owned(), "/nix/store/x-hello".to_owned())]),
+                required_system_features: Vec::from(&["kvm".to_owned(), "nixos-test".to_owned()]),
+                store_dir: "/nix/store".to_owned(),
             }))
         );
         assert_eq!(error, None);

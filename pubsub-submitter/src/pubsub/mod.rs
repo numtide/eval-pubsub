@@ -400,7 +400,7 @@ impl PubSubClient for PubSubService {
                     let done_with_backfill = done_with_backfill.clone();
                     let started_backfill = started_backfill.clone();
                     async move {
-                        started_backfill.notified().await;
+                        started_backfill.notify_one();
                         db_connector::listen(
                             &mut conn_notifs,
                             async move |job_output_notification: JobOutputNotification| {
@@ -419,20 +419,20 @@ impl PubSubClient for PubSubService {
                                                 job_output,
                                                 job_uuid
                                             );
-                                            tx.send(Ok(proto::client::TailJobResponse {
-                                                line: job_output.line,
-                                            }))
-                                            .await
-                                            .unwrap();
+                                            let _ = tx
+                                                .send(Ok(proto::client::TailJobResponse {
+                                                    line: job_output.line,
+                                                }))
+                                                .await;
                                         }
                                         None => {
-                                            tx.send(Err(SubmitterError::JobOutputNotFound {
-                                                job_output_id: job_output_notification
-                                                    .job_output_id,
-                                            }
-                                            .into()))
-                                                .await
-                                                .unwrap();
+                                            let _ = tx
+                                                .send(Err(SubmitterError::JobOutputNotFound {
+                                                    job_output_id: job_output_notification
+                                                        .job_output_id,
+                                                }
+                                                .into()))
+                                                .await;
                                         }
                                     }
                                 }
@@ -453,9 +453,12 @@ impl PubSubClient for PubSubService {
             "backfill_job",
             async move {
                 let mut counter = 0;
-                let job_outputs = db_connector::get_job_outputs(&mut conn, job_uuid, end, number);
-                started_backfill.notify_one();
-                for job_output in job_outputs.await.unwrap() {
+                let job_outputs =
+                    db_connector::get_job_outputs(&mut conn, job_uuid, end, number).await;
+                if follow {
+                    started_backfill.notified().await;
+                }
+                for job_output in job_outputs.unwrap() {
                     if log::log_enabled!(log::Level::Debug) {
                         counter += 1;
                     }
