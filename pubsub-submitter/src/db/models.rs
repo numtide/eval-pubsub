@@ -106,12 +106,20 @@ pub struct JobOutput {
     pub line: String,
 }
 
-#[derive(Insertable)]
+#[derive(Insertable, Debug)]
+#[diesel(table_name = crate::schema::job_attribute)]
+pub struct NewJobAttribute<'a> {
+    pub attr_path: &'a Vec<String>,
+}
+
+#[derive(Insertable, Debug)]
 #[diesel(table_name = crate::schema::job_output)]
 pub struct NewJobOutput<'a> {
     pub job_id: Uuid,
     pub line: &'a str,
     pub time: SystemTime,
+    #[diesel(treat_none_as_default_value = false)]
+    pub attr_id: Option<i64>,
 }
 
 #[derive(Queryable, Selectable, Debug, Insertable)]

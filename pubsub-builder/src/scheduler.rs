@@ -61,7 +61,7 @@ async fn run_job(executor: &Executor, offer: Offer) {
 
     if let Conclusion::Failure(reason) = &conclusion {
         output
-            .line(format!("job failed: {}", reason), UtcDateTime::now())
+            .line(format!("job failed: {}", reason), None, UtcDateTime::now())
             .await;
     }
 

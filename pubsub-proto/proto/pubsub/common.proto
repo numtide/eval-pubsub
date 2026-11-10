@@ -108,6 +108,11 @@ message JobStatus {
 }
 
 message JobOutput {
+  message AttrPath {
+    repeated string attr_path = 1;
+  }
+
   string line = 1;
   google.protobuf.Timestamp time = 2;
+  AttrPath attr_path = 3;
 }

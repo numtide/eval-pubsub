@@ -3,12 +3,13 @@ use std::sync::Arc;
 use diesel::{
     Connection as _, ExpressionMethods as _, Insertable, OptionalExtension as _, PgConnection,
     SelectableHelper as _,
+    deserialize::QueryableByName,
     insertable::CanInsertInSingleQuery,
     pg::Pg,
     query_builder::{QueryFragment, QueryId},
     query_dsl::QueryDsl as _,
     sql_query,
-    sql_types::{self, Text},
+    sql_types::{self, Array, Text},
 };
 use diesel_async::{
     AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _,
@@ -25,11 +26,12 @@ use tokio_stream::StreamExt as _;
 use uuid::Uuid;
 
 use crate::{
-    db,
+    db::{self, models::NewJobAttribute},
     error::SubmitterError,
     models,
     schema::{
-        builder, concluded_eval_job, eval_job, job_output, pending_eval_job, picked_eval_job,
+        builder, concluded_eval_job, eval_job, job_attribute, job_output, pending_eval_job,
+        picked_eval_job,
     },
 };
 
@@ -369,7 +371,7 @@ pub async fn get_job_outputs(
                 SELECT *
                 FROM job_output
                 WHERE job_id = $1
-                ORDER BY time DESC
+                ORDER BY (attr_id, time) DESC
                 LIMIT $2
               )
               ORDER BY time ASC;
@@ -390,6 +392,53 @@ pub async fn get_job_outputs(
             .await
             .map_err(Into::into)
     }
+}
+
+#[derive(QueryableByName)]
+#[diesel(table_name = crate::schema::job_attribute)]
+struct JobAttributeId {
+    id: i64,
+}
+
+pub async fn insert_job_attributes<'a>(
+    conn: &mut Object<AsyncPgConnection>,
+    job_attributes: &Vec<NewJobAttribute<'a>>,
+) -> Result<Vec<i64>, SubmitterError>
+where
+{
+    let placeholders = (1..=job_attributes.len())
+        .into_iter()
+        .map(|idx| format!("( ${} )", idx))
+        .intersperse(", ".to_owned())
+        .collect::<String>();
+    let mut query = sql_query(format!(
+        r#"
+      WITH job_attribute_values("attr_path") AS (
+          VALUES {}
+      ), new_job_attribute AS (
+          INSERT INTO job_attribute ("attr_path")
+          SELECT attr_path FROM job_attribute_values
+          ON CONFLICT("attr_path") DO NOTHING
+          RETURNING "id"
+      ) SELECT "id"
+          FROM new_job_attribute
+         UNION
+        SELECT job_attribute.id
+          FROM job_attribute, job_attribute_values
+         WHERE job_attribute.attr_path = job_attribute_values.attr_path
+    "#,
+        placeholders
+    ))
+    .into_boxed();
+
+    for job_attribute in job_attributes {
+        query = query.bind::<Array<Text>, _>(job_attribute.attr_path);
+    }
+    query
+        .load(conn)
+        .await
+        .map_err(Into::into)
+        .map(|ids: Vec<JobAttributeId>| ids.into_iter().map(|id| id.id).collect())
 }
 
 pub async fn get_builder(

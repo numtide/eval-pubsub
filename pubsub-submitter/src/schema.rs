@@ -38,11 +38,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    job_attribute (id) {
+        id -> Int8,
+        attr_path -> Array<Nullable<Text>>,
+    }
+}
+
+diesel::table! {
     job_output (id) {
         id -> Int8,
         job_id -> Uuid,
         time -> Timestamp,
         line -> Text,
+        attr_id -> Nullable<Int8>,
     }
 }
 
@@ -62,6 +70,7 @@ diesel::table! {
 diesel::joinable!(concluded_eval_job -> builder (builder_id));
 diesel::joinable!(concluded_eval_job -> eval_job (id));
 diesel::joinable!(job_output -> eval_job (job_id));
+diesel::joinable!(job_output -> job_attribute (attr_id));
 diesel::joinable!(pending_eval_job -> eval_job (id));
 diesel::joinable!(picked_eval_job -> builder (builder_id));
 diesel::joinable!(picked_eval_job -> eval_job (id));
@@ -70,6 +79,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     builder,
     concluded_eval_job,
     eval_job,
+    job_attribute,
     job_output,
     pending_eval_job,
     picked_eval_job,

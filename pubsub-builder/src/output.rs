@@ -17,7 +17,7 @@ impl OutputSink {
         Self { submitter, job_id }
     }
 
-    pub async fn line<S>(&self, line: S, time: UtcDateTime)
+    pub async fn line<S>(&self, line: S, attr_path: Option<&Vec<String>>, time: UtcDateTime)
     where
         S: Into<String>,
     {
@@ -28,6 +28,11 @@ impl OutputSink {
                 vec![JobOutput {
                     line: line.into(),
                     time: Some(Into::<SystemTime>::into(time).into()),
+                    attr_path: attr_path.map(|attr_path| {
+                        pubsub_proto::pubsub::common::job_output::AttrPath {
+                            attr_path: attr_path.clone(),
+                        }
+                    }),
                 }],
             )
             .await

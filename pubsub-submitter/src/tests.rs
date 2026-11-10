@@ -510,7 +510,10 @@ async fn end_to_end() {
                                     .into_iter()
                                     .map(|line| proto::common::JobOutput {
                                         line: line.to_owned(),
-                                        time: Some(SystemTime::now().into())
+                                        time: Some(SystemTime::now().into()),
+                                        attr_path: None,// (Some(proto::common::job_output::AttrPath {
+                                        //     attr_path: vec!["test".to_owned(), "linux".to_owned()]
+                                        // }))
                                     })
                                     .collect(),
                                 }))

@@ -9,6 +9,8 @@ use pubsub_proto::pubsub::client::pub_sub_client_server::PubSubClient;
 use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
 
 use itertools::Itertools;
+use std::collections::HashMap;
+use std::ops::Deref;
 use std::panic;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -299,12 +301,32 @@ impl PubSub for PubSubService {
 
         let mut conn = self.db_connector.get().await.through()?;
         conn.transaction::<_, SubmitterError, _>(async |mut conn| {
+            let new_job_attributes = output
+                .into_iter()
+                .map(|job_output| match &job_output.attr_path {
+                    Some(attr_path) => Some(db::models::NewJobAttribute {
+                        attr_path: &attr_path.attr_path,
+                    }),
+                    None => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            println!("new_job_attributes: {:?}", new_job_attributes,);
+            let attribute_ids =
+                db_connector::insert_job_attributes(&mut conn, &new_job_attributes).await?;
+            println!("attribute_ids: {:?}", attribute_ids,);
+            let attribute_ids = new_job_attributes
+                .into_iter()
+                .map(|new_job_attribute| new_job_attribute.attr_path)
+                .zip(attribute_ids.into_iter())
+                .collect::<HashMap<_, _>>();
+
             let uuids = db_connector::insert_job_outputs(
                 &mut conn,
                 output
                     .into_iter()
                     .map(|job_output| {
-                        Ok(db::models::NewJobOutput {
+                        let jb = db::models::NewJobOutput {
                             job_id: job_uuid,
                             line: job_output.line.as_str(),
                             time: job_output
@@ -314,7 +336,12 @@ impl PubSub for PubSubService {
                                 .and_then(|time| {
                                     TryInto::<SystemTime>::try_into(time).map_err(Into::into)
                                 })?,
-                        })
+                            attr_id: job_output.attr_path.as_ref().and_then(|attr_path| {
+                                attribute_ids.get(&attr_path.attr_path).map(|x| *x)
+                            }),
+                        };
+                        log::debug!("inserting {:?}", jb);
+                        Ok(jb)
                     })
                     .collect::<Result<Vec<_>, SubmitterError>>()?,
             )

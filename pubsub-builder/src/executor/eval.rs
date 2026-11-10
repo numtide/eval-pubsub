@@ -160,51 +160,24 @@ where
         println!("{}", line);
         match parse_line(prefix, &line) {
             Ok((attr, error)) => {
-                output.line(summarize(&attr), UtcDateTime::now()).await;
+                output
+                    .line(summarize(&attr), Some(&attr.attr_path), UtcDateTime::now())
+                    .await;
                 for line in error.iter().flat_map(|error| error.lines()) {
-                    output.line(line, UtcDateTime::now()).await;
+                    output
+                        .line(line, Some(&attr.attr_path), UtcDateTime::now())
+                        .await;
                 }
                 attrs.push(attr);
             }
             Err(err) => {
                 log::warn!("unparseable nix-eval-jobs output {:?}: {}", line, err);
-                output.line(line, UtcDateTime::now()).await;
+                output.line(line, None, UtcDateTime::now()).await;
             }
         }
     }
 
     attrs
-}
-
-async fn forward_lines<R>(reader: R, output: &OutputSink)
-where
-    R: AsyncRead + Unpin,
-{
-    let mut lines = BufReader::new(reader).lines();
-
-    while let Ok(Some(line)) = lines.next_line().await {
-        output
-            .line(strip_ansi_escapes(&line), UtcDateTime::now())
-            .await;
-    }
-}
-
-// TODO I don't think we should do this here, that's the responsibility of the presentation layer, not the builder
-fn strip_ansi_escapes(line: &str) -> String {
-    let mut stripped = String::with_capacity(line.len());
-    let mut chars = line.chars();
-
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            if chars.next() == Some('[') {
-                chars.find(|c| ('@'..='~').contains(c));
-            }
-        } else {
-            stripped.push(c);
-        }
-    }
-
-    stripped
 }
 
 fn parse_line(
