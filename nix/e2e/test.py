@@ -80,3 +80,8 @@ with subtest("job output carries evaluation results and errors"):
     assert f"evaluated evalJobs.hello: {__hello_drv_path}" in output
     assert "failed to evaluate evalJobs.broken:" in output
     assert "error: boom" in output
+
+with subtest("dump pubsub database for further inspection"):
+    submitter.succeed("runuser -u postgres -- pg_dump pubsub -f /tmp/dump.sql ")
+
+    submitter.copy_from_machine("/tmp/dump.sql", "dump.sql")
