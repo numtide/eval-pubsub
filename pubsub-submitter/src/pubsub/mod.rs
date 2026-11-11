@@ -719,9 +719,7 @@ impl PubSubService {
         Ok(pub_sub_service)
     }
 
-    pub fn run_migrations(
-        &mut self,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+    pub fn run_migrations(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.db_connector.run_migrations()
     }
 

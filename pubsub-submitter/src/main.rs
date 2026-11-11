@@ -17,7 +17,7 @@ use tokio::net::TcpListener;
 use tonic::{service::Routes, transport::Server};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Ok(_) = std::env::var("RUST_LOG") {
         env_logger::init();
     } else {
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>
             .filter_level(log::LevelFilter::Info)
             .init();
     };
-    let cli: cli::Cli = cli::Cli::parse();
+    let cli: cli::FinalConfig = cli::FinalConfig::parse()?;
     log::info!("running with config: {:?}", cli);
 
     let mut svc = pubsub::PubSubService::new(cli.database_url).await?;

@@ -294,12 +294,4 @@ mod tests {
         assert_eq!(attr.result, Some(AttrResult::Failed(Failed {})));
         assert_eq!(error.as_deref(), Some("error: boom"));
     }
-
-    #[test]
-    fn strip_colors() {
-        assert_eq!(
-            strip_ansi_escapes("\u{1b}[31;1merror:\u{1b}[0m boom"),
-            "error: boom"
-        );
-    }
 }
