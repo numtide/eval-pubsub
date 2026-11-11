@@ -83,13 +83,13 @@ try:
         assert "error: boom" in output
 except Exception as exc:
     with subtest("dump pubsub database for further inspection"):
-        submitter.succeed("runuser -u postgres -- pg_dump pubsub -f /tmp/dump.sql ")
+        submitter.succeed("runuser -u postgres -- pg_dump pubsub-submitter -f /tmp/dump.sql ")
 
         submitter.copy_from_machine("/tmp/dump.sql", "postgres")
         shutil.copy(submitter.out_dir / "postgres" / "dump.sql", "dump.sql")
     raise exc
 finally:
     with subtest("dump pubsub database for further inspection"):
-        submitter.succeed("runuser -u postgres -- pg_dump pubsub -f /tmp/dump.sql ")
+        submitter.succeed("runuser -u postgres -- pg_dump pubsub-submitter -f /tmp/dump.sql ")
 
         submitter.copy_from_machine("/tmp/dump.sql", "dump.sql")

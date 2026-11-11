@@ -48,31 +48,36 @@ pkgs.testers.runNixOSTest {
 
   nodes = {
     submitter = {
+      imports = [
+        nixosModules."pubsubSubmitter"
+      ];
+
       virtualisation.cores = 4;
 
       services.postgresql = {
         enable = true;
         package = pkgs.postgresql_18;
-        ensureDatabases = [ "pubsub" ];
+        ensureDatabases = [ "pubsub-submitter" ];
         ensureUsers = [
           {
-            name = "pubsub";
+            name = "pubsub-submitter";
             ensureDBOwnership = true;
           }
         ];
       };
 
-      imports = [
-        nixosModules."pubsubSubmitter"
-      ];
-
       services.pubsub.submitter = {
         enable = true;
         openFirewall = true;
+        logLevel = "pubsub_=trace";
       };
     };
 
     builder = {
+      imports = [
+        nixosModules."pubsubBuilder"
+      ];
+
       nix.settings.experimental-features = [
         "nix-command"
         "flakes"
@@ -80,27 +85,12 @@ pkgs.testers.runNixOSTest {
 
       system.extraDependencies = [ flake ];
 
-      systemd.services.pubsub-builder = {
-        wantedBy = [ "multi-user.target" ];
-        wants = [ "network-online.target" ];
-        after = [ "network-online.target" ];
-        environment = {
-          HOME = "/var/lib/pubsub-builder";
-          RUST_LOG = "pubsub_=trace";
-        };
-        serviceConfig = {
-          StateDirectory = "pubsub-builder";
-          ExecStart = pkgs.lib.escapeShellArgs [
-            pubsub-builder
-            "--submitter"
-            "http://submitter:10000"
-            "--state-dir"
-            "/var/lib/pubsub-builder"
-            "--store-uri"
-            "ssh-ng://builder"
-            "--nix-eval-jobs"
-            "${lib.getExe pkgs.nix-eval-jobs}"
-          ];
+      services.pubsub.builder = {
+        enable = true;
+        logLevel = "pubsub_=trace";
+
+        settings = {
+          submitter = "http://submitter:10000";
         };
       };
     };

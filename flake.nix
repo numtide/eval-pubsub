@@ -30,7 +30,9 @@
         pubsubSubmitter = lib.modules.importApply ./nix/nixos/modules/submitter.nix {
           pubsubRecipe = ./nix/package.nix;
         };
-        pubsubBuilder = ./nix/nixos/modules/builder.nix;
+        pubsubBuilder = lib.modules.importApply ./nix/nixos/modules/builder.nix {
+          pubsubRecipe = ./nix/package.nix;
+        };
       };
     }
     // inputs."flake-utils".lib.eachSystem systems (system: {

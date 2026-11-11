@@ -22,7 +22,7 @@ in
     port = lib.mkOption {
       type = lib.types.port;
       description = ''
-        Port number to liste on.
+        Port number to listen on.
       '';
       default = 10000;
     };
@@ -53,7 +53,7 @@ in
             description = ''
               Address of the PostgreSQL database the pubsub submitter service will use.
             '';
-            default = "host=/run/postgresql user=pubsub dbname=pubsub";
+            default = "host=/run/postgresql user=pubsub-submitter dbname=pubsub-submitter";
           };
         };
       };
@@ -73,11 +73,11 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    users.users.pubsub = {
+    users.users.pubsub-submitter = {
       isSystemUser = true;
-      group = "pubsub";
+      group = "pubsub-submitter";
     };
-    users.groups.pubsub = { };
+    users.groups.pubsub-submitter = { };
 
     systemd.services.pubsub-submitter = {
       wantedBy = [ "multi-user.target" ];
@@ -87,8 +87,13 @@ in
         RUST_LOG = cfg.logLevel;
       };
       serviceConfig = {
-        User = "pubsub";
-        ExecStart = "${lib.getExe' cfg.package "pubsub-submitter"} --config-file ${cfg.configFile}";
+        User = "pubsub-submitter";
+        Group = "pubsub-submitter";
+        ExecStart = lib.escapeShellArgs [
+          (lib.getExe' cfg.package "pubsub-submitter")
+          "--config-file"
+          cfg.configFile
+        ];
       };
     };
 
