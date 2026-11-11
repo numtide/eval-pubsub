@@ -25,7 +25,15 @@
         "armv7l-linux"
       ];
     in
-    inputs."flake-utils".lib.eachSystem systems (system: {
+    {
+      nixosModules = {
+        pubsubSubmitter = lib.modules.importApply ./nix/nixos/modules/submitter.nix {
+          pubsubRecipe = ./nix/package.nix;
+        };
+        pubsubBuilder = ./nix/nixos/modules/builder.nix;
+      };
+    }
+    // inputs."flake-utils".lib.eachSystem systems (system: {
       devShells =
         let
           pkgs = pkgs'.${system};
@@ -65,6 +73,7 @@
         e2e = import ./nix/e2e {
           pkgs = pkgs'.${system};
           pubsub = inputs.self.packages.${system}.default;
+          inherit (inputs."self") nixosModules;
         };
       };
     });

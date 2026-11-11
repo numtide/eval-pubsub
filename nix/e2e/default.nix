@@ -2,6 +2,7 @@
   pkgs,
   pubsub,
   lib ? pkgs.lib,
+  nixosModules,
 }:
 
 let
@@ -61,29 +62,14 @@ pkgs.testers.runNixOSTest {
         ];
       };
 
-      users.users.pubsub = {
-        isSystemUser = true;
-        group = "pubsub";
-      };
-      users.groups.pubsub = { };
+      imports = [
+        nixosModules."pubsubSubmitter"
+      ];
 
-      systemd.services.pubsub-submitter = {
-        wantedBy = [ "multi-user.target" ];
-        requires = [ "postgresql.target" ];
-        after = [ "postgresql.target" ];
-        environment = {
-          DATABASE_URL = "host=/run/postgresql user=pubsub dbname=pubsub";
-          PUBSUB_LISTEN = "[::]:10000";
-          RUST_LOG = "pubsub_=trace";
-        };
-        serviceConfig = {
-          User = "pubsub";
-          ExecStart = pubsub-submitter;
-        };
+      services.pubsub.submitter = {
+        enable = true;
+        openFirewall = true;
       };
-
-      networking.firewall.allowedTCPPorts = [ 10000 ];
-      environment.systemPackages = [ pkgs.grpcurl ];
     };
 
     builder = {
