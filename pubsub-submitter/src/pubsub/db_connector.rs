@@ -406,13 +406,14 @@ pub async fn insert_job_attributes<'a>(
 ) -> Result<Vec<i64>, SubmitterError>
 where
 {
-    let placeholders = (1..=job_attributes.len())
-        .into_iter()
-        .map(|idx| format!("( ${} )", idx))
-        .intersperse(", ".to_owned())
-        .collect::<String>();
-    let mut query = sql_query(format!(
-        r#"
+    if !job_attributes.is_empty() {
+        let placeholders = (1..=job_attributes.len())
+            .into_iter()
+            .map(|idx| format!("( ${} )", idx))
+            .intersperse(", ".to_owned())
+            .collect::<String>();
+        let mut query = sql_query(format!(
+            r#"
       WITH job_attribute_values("attr_path") AS (
           VALUES {}
       ), new_job_attribute AS (
@@ -427,18 +428,21 @@ where
           FROM job_attribute, job_attribute_values
          WHERE job_attribute.attr_path = job_attribute_values.attr_path
     "#,
-        placeholders
-    ))
-    .into_boxed();
+            placeholders
+        ))
+        .into_boxed();
 
-    for job_attribute in job_attributes {
-        query = query.bind::<Array<Text>, _>(job_attribute.attr_path);
+        for job_attribute in job_attributes {
+            query = query.bind::<Array<Text>, _>(job_attribute.attr_path);
+        }
+        query
+            .load(conn)
+            .await
+            .map_err(Into::into)
+            .map(|ids: Vec<JobAttributeId>| ids.into_iter().map(|id| id.id).collect())
+    } else {
+        Ok(Vec::new())
     }
-    query
-        .load(conn)
-        .await
-        .map_err(Into::into)
-        .map(|ids: Vec<JobAttributeId>| ids.into_iter().map(|id| id.id).collect())
 }
 
 pub async fn get_builder(

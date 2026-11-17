@@ -128,7 +128,7 @@ pub struct NewJobOutput<'a> {
 pub struct EvalJob {
     pub id: Uuid,
     pub type_: EvalJobType,
-    pub flake_ref: Option<String>,
+    pub store_path: Option<String>,
     pub attrs: Option<Vec<Option<String>>>,
 }
 
@@ -139,12 +139,12 @@ impl From<models::Job> for EvalJob {
                 job_id,
                 anonymous_job:
                     models::AnonymousJob::EvalJob {
-                        eval_job: models::EvalJob::Flake { flake_ref, attrs },
+                        eval_job: models::EvalJob::Flake { store_path, attrs },
                     },
             } => EvalJob {
                 id: job_id,
                 type_: EvalJobType::Flake,
-                flake_ref: Some(flake_ref),
+                store_path: Some(store_path),
                 attrs: Some(attrs.into_iter().map(Some).collect()),
             },
             _ => panic!("database doesn't support non-flake non-eval jobs currently"),
@@ -160,13 +160,13 @@ impl TryFrom<EvalJob> for models::Job {
             EvalJob {
                 id,
                 type_: EvalJobType::Flake,
-                flake_ref,
+                store_path,
                 attrs,
             } => Ok(models::Job {
                 job_id: id,
                 anonymous_job: models::AnonymousJob::EvalJob {
                     eval_job: models::EvalJob::Flake {
-                        flake_ref: flake_ref.ok_or(())?,
+                        store_path: store_path.ok_or(())?,
                         attrs: attrs
                             .ok_or(())?
                             .into_iter()
@@ -186,7 +186,7 @@ pub struct EvalJobWithStatus {
     #[diesel(column_name = "type", sql_type = diesel::sql_types::Text)]
     pub r#type: String,
     #[diesel(sql_type = diesel::sql_types::Text)]
-    pub flake_ref: String,
+    pub store_path: String,
     #[diesel(sql_type = diesel::sql_types::Array<diesel::sql_types::Text>)]
     pub attrs: Vec<String>,
     #[diesel(sql_type = diesel::sql_types::Bool)]
@@ -212,7 +212,7 @@ impl TryFrom<EvalJobWithStatus> for models::JobWithStatus {
                 anonymous_job: models::AnonymousJob::EvalJob {
                     eval_job: match value.r#type.as_str() {
                         "flake" => models::EvalJob::Flake {
-                            flake_ref: value.flake_ref,
+                            store_path: value.store_path,
                             attrs: value.attrs,
                         },
                         _ => Err(())?,

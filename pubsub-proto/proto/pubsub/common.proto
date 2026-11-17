@@ -10,7 +10,7 @@ message BuildJob {
 
 message EvalJob {
   message Flake {
-    string flake_ref = 1;
+    string store_path = 1;
     repeated string attrs = 2;
   }
 

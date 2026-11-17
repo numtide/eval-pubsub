@@ -14,7 +14,7 @@ pub struct BuildJob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalJob {
     Flake {
-        flake_ref: String,
+        store_path: String,
         attrs: Vec<String>,
     },
 }
@@ -136,14 +136,14 @@ impl From<JobWithStatus> for proto::common::JobWithStatus {
 }
 
 impl EvalJob {
-    pub fn new_flake<S1, S2, I>(flake_ref: S1, attrs: I) -> Self
+    pub fn new_flake<S1, S2, I>(store_path: S1, attrs: I) -> Self
     where
         S1: AsRef<str>,
         S2: AsRef<str>,
         I: IntoIterator<Item = S2>,
     {
         Self::Flake {
-            flake_ref: flake_ref.as_ref().to_owned(),
+            store_path: store_path.as_ref().to_owned(),
             attrs: attrs
                 .into_iter()
                 .map(|str| str.as_ref().to_owned())
@@ -222,9 +222,9 @@ pub mod proto_conversion {
     impl From<super::EvalJob> for proto::common::EvalJob {
         fn from(value: super::EvalJob) -> Self {
             match value {
-                super::EvalJob::Flake { flake_ref, attrs } => proto::common::EvalJob {
+                super::EvalJob::Flake { store_path, attrs } => proto::common::EvalJob {
                     r#type: Some(proto::common::eval_job::Type::Flake(
-                        proto::common::eval_job::Flake { flake_ref, attrs },
+                        proto::common::eval_job::Flake { store_path, attrs },
                     )),
                 },
             }
@@ -237,9 +237,9 @@ pub mod proto_conversion {
         fn try_from(value: proto::common::EvalJob) -> Result<Self, Self::Error> {
             match value.r#type {
                 Some(proto::common::eval_job::Type::Flake(proto::common::eval_job::Flake {
-                    flake_ref,
+                    store_path,
                     attrs,
-                })) => Ok(super::EvalJob::Flake { flake_ref, attrs }),
+                })) => Ok(super::EvalJob::Flake { store_path, attrs }),
                 None => Err(ProtocolError::field_missing(&["type"])),
             }
         }

@@ -1,6 +1,9 @@
 pub mod error;
 
-use std::io::ErrorKind::StaleNetworkFileHandle;
+use std::{
+    io::ErrorKind::StaleNetworkFileHandle,
+    process::{Command, Stdio},
+};
 
 use futures::{Stream, StreamExt as _};
 use pubsub_proto::pubsub::{
@@ -8,6 +11,7 @@ use pubsub_proto::pubsub::{
     common,
 };
 use serde::{Deserialize, Serialize};
+use tokio_util::io::SyncIoBridge;
 use tonic::{Request, Status, transport::Channel};
 use uuid::Uuid;
 
@@ -103,15 +107,40 @@ pub enum EvalJob {
     },
 }
 
-impl From<EvalJob> for common::EvalJob {
-    fn from(value: EvalJob) -> Self {
-        match value {
-            EvalJob::Flake { flake_ref, attrs } => Self {
-                r#type: Some(common::eval_job::Type::Flake(common::eval_job::Flake {
-                    flake_ref,
-                    attrs,
-                })),
-            },
+impl EvalJob {
+    fn resolve(self) -> common::EvalJob {
+        match self {
+            Self::Flake { flake_ref, attrs } => {
+                let mut child = Command::new("nix")
+                    .args(&[
+                        "--extra-experimental-features",
+                        "nix-command flakes",
+                        "flake",
+                        "metadata",
+                        "--json",
+                    ])
+                    .arg(&flake_ref)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap();
+
+                let stdout = child.stdout.take().expect("stdout is piped");
+
+                let mut value: serde_json::Value = serde_json::from_reader(stdout).unwrap();
+                let store_path: serde_json::Value = value["path"].take();
+                let store_path = serde_json::from_value(store_path).unwrap();
+
+                log::info!("resolved {} to {}", flake_ref, store_path);
+
+                common::EvalJob {
+                    r#type: Some(common::eval_job::Type::Flake(common::eval_job::Flake {
+                        store_path,
+                        attrs,
+                    })),
+                }
+            }
         }
     }
 }
@@ -125,7 +154,7 @@ impl TryFrom<common::EvalJob> for EvalJob {
             .ok_or(GrpcError::field_missing(&["type", "type"]))?;
         match value {
             common::eval_job::Type::Flake(flake) => Ok(EvalJob::Flake {
-                flake_ref: flake.flake_ref,
+                flake_ref: format!("path:{}", flake.store_path),
                 attrs: flake.attrs,
             }),
         }
@@ -161,11 +190,11 @@ pub enum AnonymousJob {
     BuildJob(BuildJob),
 }
 
-impl From<AnonymousJob> for common::AnonymousJob {
-    fn from(value: AnonymousJob) -> Self {
-        match value {
+impl AnonymousJob {
+    fn resolve(self) -> common::AnonymousJob {
+        match self {
             AnonymousJob::EvalJob(eval_job) => common::AnonymousJob {
-                r#type: Some(common::anonymous_job::Type::Eval(eval_job.into())),
+                r#type: Some(common::anonymous_job::Type::Eval(eval_job.resolve())),
             },
             AnonymousJob::BuildJob(build_job) => common::AnonymousJob {
                 r#type: Some(common::anonymous_job::Type::Build(build_job.into())),
@@ -295,7 +324,7 @@ impl Client<Channel> {
         let response = self
             .tonic_client
             .submit_job(Request::new(client::SubmitJobRequest {
-                job: Some(anonymous_job.into()),
+                job: Some(anonymous_job.resolve()),
             }))
             .await
             .map_err(Into::<GrpcError>::into)?;

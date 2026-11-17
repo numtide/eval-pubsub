@@ -98,7 +98,7 @@ async fn run_flake(
 
     let mut attrs = Vec::new();
     for attr in flake.attrs {
-        let installable = format!("{}#{}", flake.flake_ref, attr);
+        let installable = format!("path:{}#{}", flake.store_path, attr);
         match evaluate(nix_eval_jobs, &installable, &[attr], output).await {
             Ok(results) => attrs.extend(results),
             Err(reason) => return Conclusion::Failure(reason),
@@ -121,7 +121,7 @@ async fn evaluate(
         .arg(installable)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .map_err(|err| format!("failed to start {}: {}", nix_eval_jobs.display(), err))?;

@@ -32,7 +32,7 @@ diesel::table! {
         id -> Uuid,
         #[sql_name = "type"]
         type_ -> EvalJobType,
-        flake_ref -> Nullable<Text>,
+        store_path -> Nullable<Text>,
         attrs -> Nullable<Array<Nullable<Text>>>,
     }
 }
