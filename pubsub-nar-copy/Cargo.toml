@@ -1,0 +1,19 @@
+[package]
+name = "pubsub-nar-copy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pubsub-proto = { path = "../pubsub-proto" }
+tokio = "*"
+tokio-stream = "*"
+tonic = "*"
+thiserror = "1.0"
+itertools = { version = "0.15" }
+log = "0.4"
+futures = "0.3"
+nom = "8.0"
+bytes = "1.12"
+base32 = "0.5"
+base16 = "0.2"
+base64 = "0.23"

@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package pubsub.nar_copy;
+
+import "common.proto";
+
+service NarCopy {
+  rpc DownloadNarInfo(DownloadNarInfoRequest) returns (DownloadNarInfoResponse) {}
+  rpc DownloadNar(DownloadNarRequest) returns (stream DownloadNarResponse) {}
+}
+
+message DownloadNarInfoRequest {
+  string hash = 1;
+}
+
+message DownloadNarInfoResponse {
+  string store_path = 1;
+  string nar_hash = 2;
+  uint64 nar_size = 3;
+  repeated string reference = 4;
+  // optional
+  string deriver = 5;
+  repeated string signature = 6;
+  string ca = 7;
+}
+
+message DownloadNarRequest {
+  string hash = 1;
+  uint64 chunk_size = 2;
+}
+
+message DownloadNarResponse {
+  uint64 offset = 1;
+  bytes body = 2;
+}

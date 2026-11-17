@@ -6,5 +6,6 @@ members = [
   "pubsub-client",
   "pubsub-common",
   "pubsub-proto",
-  "pubsub-submitter"
+  "pubsub-submitter",
+  "pubsub-nar-copy"
 ]
