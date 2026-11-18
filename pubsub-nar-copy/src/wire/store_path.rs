@@ -1,11 +1,12 @@
 use std::fmt::Display;
 
 use bytes::{BufMut as _, BytesMut};
+use nix_base32::{from_nix_base32, to_nix_base32};
 use nom::{AsBytes, IResult, Parser as _, number::Endianness};
 
-use crate::wire::{self, NixDeserialize, NixSerialize, ProtocolVersion};
+use crate::wire::{self, NixDeserialize, NixSerialize, ProtocolVersion, protocol_version};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StorePath {
     pub store_dir: Option<String>,
     pub hash: [u8; 20],
@@ -25,7 +26,7 @@ impl TryFrom<&str> for StorePath {
         };
 
         let first_dash = string.find('-').expect("a dash in the store path");
-        let hash = base32::decode(base32::Alphabet::Crockford, &string[0..first_dash])
+        let hash = from_nix_base32(&string[0..first_dash])
             .expect("a valid base32 encoded hash")
             .try_into()
             .expect("a hash of length 160 bits (20 bytes)");
@@ -40,11 +41,11 @@ impl TryFrom<&str> for StorePath {
     }
 }
 
-impl From<StorePath> for String {
-    fn from(value: StorePath) -> Self {
-        let encoded_hash = base32::encode(base32::Alphabet::Crockford, &value.hash).to_lowercase();
+impl From<&StorePath> for String {
+    fn from(value: &StorePath) -> Self {
+        let encoded_hash = to_nix_base32(&value.hash);
 
-        if let Some(store_dir) = value.store_dir {
+        if let Some(store_dir) = &value.store_dir {
             format!("{}/{}-{}", store_dir, encoded_hash, value.name)
         } else {
             format!("{}-{}", encoded_hash, value.name)
@@ -54,7 +55,7 @@ impl From<StorePath> for String {
 
 impl Display for StorePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let encoded_hash = base32::encode(base32::Alphabet::Crockford, &self.hash).to_lowercase();
+        let encoded_hash = to_nix_base32(&self.hash);
 
         if let Some(store_dir) = &self.store_dir {
             write!(f, "{}/{}-{}", store_dir, encoded_hash, self.name)
@@ -92,7 +93,7 @@ impl NixSerialize for StorePath {
             size += store_dir.as_bytes().len() + 1;
         }
 
-        let encoded_hash = base32::encode(base32::Alphabet::Crockford, &self.hash).to_lowercase();
+        let encoded_hash = to_nix_base32(&self.hash);
 
         size += encoded_hash.as_bytes().len();
         size += 1 + self.name.as_bytes().len();
@@ -129,10 +130,7 @@ mod test {
             store_path,
             StorePath {
                 store_dir: Some("/nix/store".to_string()),
-                hash: base32::decode(base32::Alphabet::Crockford, hash)
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
+                hash: from_nix_base32(hash).unwrap().try_into().unwrap(),
                 name: "rustc-wrapper-1.95.0".to_string()
             }
         );
@@ -154,18 +152,16 @@ mod test {
     #[test]
     fn roundtrip_relative() {
         let hash = "7fppvgqxs3zxhvrpqnmwydn70bzgbnnx";
-        let string_store_path = format!("{}-rustc-wrapper-1.95.0", hash);
+        let name = "rustc-wrapper-1.95.0";
+        let string_store_path = format!("{}-{}", hash, name);
 
         let store_path = StorePath::try_from(string_store_path.as_str()).unwrap();
         assert_eq!(
             store_path,
             StorePath {
                 store_dir: None,
-                hash: base32::decode(base32::Alphabet::Crockford, hash)
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-                name: "rustc-wrapper-1.95.0".to_string()
+                hash: from_nix_base32(hash).unwrap().try_into().unwrap(),
+                name: name.to_owned()
             }
         );
 

@@ -1,5 +1,6 @@
 use bytes::{Buf, BufMut as _, BytesMut};
 use futures::io::Cursor;
+use replace_with::replace_with_or_abort;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 use crate::wire::{NixDeserialize, ProtocolVersion};
@@ -11,8 +12,10 @@ pub struct FramedNixReader<R> {
 
 impl<R> FramedNixReader<R> {
     pub fn new(reader: R) -> Self {
+        let mut read_buffer = BytesMut::new();
+
         FramedNixReader {
-            read_buffer: BytesMut::new(),
+            read_buffer,
             reader,
         }
     }
@@ -35,8 +38,6 @@ where
         A: NixDeserialize,
     {
         loop {
-            let _ = self.reader.read_buf(&mut self.read_buffer).await.unwrap();
-
             match A::deserialize(protocol_version, &self.read_buffer) {
                 Ok((input, ok)) => {
                     let _ = self
@@ -44,10 +45,12 @@ where
                         .split_to(self.read_buffer.len() - input.len());
                     break Ok(ok);
                 }
-                Err(nom::Err::Incomplete(_)) => continue,
+                Err(nom::Err::Incomplete(_)) => {}
                 Err(nom::Err::Error(error)) => panic!("error: {:?}", error),
                 Err(nom::Err::Failure(failure)) => panic!("failure: {:?}", failure),
             }
+
+            self.reader.read_buf(&mut self.read_buffer).await.unwrap();
         }
     }
 }

@@ -103,8 +103,6 @@ where
             .await
             .unwrap();
 
-        println!("daemon_nix_version {}", daemon_nix_version);
-
         let trust = nix_socket_r.get_u64_le().await.try_into()?;
 
         let mut this = Self {
@@ -120,26 +118,17 @@ where
         Ok(this)
     }
 
-    async fn flush_logs(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>
-    where
-        RW: Send,
-    {
+    async fn flush_logs(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         while self.read_log().await? {}
 
         Ok(())
     }
 
-    async fn read_log(&mut self) -> Result<bool, Box<dyn Error + Send + Sync>>
-    where
-        RW: Send,
-    {
+    async fn read_log(&mut self) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let r#type = self.nix_socket_r.get_u64_le().await;
 
         match r#type {
-            STDERR_LAST => {
-                println!("STDERR_LAST");
-                Ok(false)
-            }
+            STDERR_LAST => Ok(false),
             STDERR_ERROR => {
                 let error: NixError = self
                     .nix_socket_r
@@ -185,11 +174,8 @@ where
 
     async fn query_path_info(
         &mut self,
-        store_path: StorePath,
-    ) -> Result<Option<UnkeyedValidPathInfo>, Box<dyn Error + Send + Sync>>
-    where
-        RW: Send,
-    {
+        store_path: &StorePath,
+    ) -> Result<Option<UnkeyedValidPathInfo>, Box<dyn Error + Send + Sync>> {
         let mut bytes_mut = BytesMut::new();
 
         Operation::QueryPathInfo.serialize(self.protocol_version, &mut bytes_mut);
@@ -202,11 +188,7 @@ where
         self.flush_logs().await?;
 
         let success = self.nix_socket_r.get_u64_le().await;
-        println!("success: {:#x}", success);
         let success: bool = success > 0;
-        println!("sent {} got {}", store_path, success);
-
-        let mut buffer = BytesMut::new();
 
         if success {
             let path_info: UnkeyedValidPathInfo = self
@@ -224,20 +206,46 @@ where
 mod tests {
     use super::*;
 
+    use std::collections::HashSet;
+
+    async fn get_closure<RW>(
+        client: &mut NixClient<RW>,
+        store_path: &wire::StorePath,
+    ) -> HashSet<wire::StorePath>
+    where
+        RW: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let mut stack = vec![store_path.clone()];
+        let mut closure = HashSet::from_iter(stack.clone().into_iter());
+
+        while let Some(item) = stack.pop() {
+            let path_info = client.query_path_info(&item).await.unwrap().unwrap();
+
+            for reference in path_info.references {
+                if !closure.contains(&reference) {
+                    stack.push(reference.clone());
+                    closure.insert(reference);
+                }
+            }
+        }
+
+        closure
+    }
+
     #[tokio::test]
     async fn handshake() -> Result<(), Box<dyn Error + Send + Sync>> {
         let nix_socket = NixClient::connect_unix_default().await.unwrap();
         let mut nix_client = NixClient::handshake(nix_socket).await?;
 
         println!("nix_client: {:?}", nix_client);
+        let store_path = StorePath::try_from(
+            "/nix/store/7fppvgqxs3zxhvrpqnmwydn70bzgbnnx-rustc-wrapper-1.95.0",
+        )?;
 
-        let path_info = nix_client
-            .query_path_info(StorePath::try_from(
-                "/nix/store/7fppvgqxs3zxhvrpqnmwydn70bzgbnnx-rustc-wrapper-1.95.0",
-            )?)
-            .await?;
-
-        println!("path_info: {:?}", path_info);
+        let closure = get_closure(&mut nix_client, &store_path).await;
+        for item in closure {
+            println!("- {}", item);
+        }
 
         Ok(())
     }

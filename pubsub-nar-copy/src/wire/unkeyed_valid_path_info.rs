@@ -17,7 +17,7 @@ use crate::wire::Time;
 pub struct UnkeyedValidPathInfo {
     deriver: OptStorePath,
     nar_hash: NarHash,
-    references: Vec<StorePath>,
+    pub references: Vec<StorePath>,
     registration_time: Time,
     nar_size: u64,
     ultimate: Option<bool>,
