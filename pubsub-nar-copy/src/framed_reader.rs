@@ -1,9 +1,49 @@
 use bytes::{Buf, BufMut as _, BytesMut};
+use display_bytes::{DisplayBytesConfig, FormatBase64};
 use futures::io::Cursor;
 use replace_with::replace_with_or_abort;
-use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
-use crate::wire::{NixDeserialize, ProtocolVersion};
+use crate::wire::{NixDeserialize, NixSerialize, ProtocolVersion};
+
+pub struct FramedNixWriter<W> {
+    write_buffer: BytesMut,
+    writer: W,
+}
+
+impl<W> FramedNixWriter<W> {
+    pub fn new(writer: W) -> Self {
+        let write_buffer = BytesMut::new();
+
+        FramedNixWriter {
+            write_buffer,
+            writer,
+        }
+    }
+}
+
+impl<W> FramedNixWriter<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    pub async fn write<A>(&mut self, protocol_version: ProtocolVersion, value: &A) -> Result<(), ()>
+    where
+        A: NixSerialize,
+    {
+        value.serialize(protocol_version, &mut self.write_buffer);
+        self.writer
+            .write_all_buf(&mut self.write_buffer)
+            .await
+            .unwrap();
+        self.write_buffer.truncate(0);
+
+        Ok(())
+    }
+
+    pub async fn flush(&mut self) -> Result<(), ()> {
+        Ok(self.writer.flush().await.unwrap())
+    }
+}
 
 pub struct FramedNixReader<R> {
     read_buffer: BytesMut,
@@ -12,7 +52,7 @@ pub struct FramedNixReader<R> {
 
 impl<R> FramedNixReader<R> {
     pub fn new(reader: R) -> Self {
-        let mut read_buffer = BytesMut::new();
+        let read_buffer = BytesMut::new();
 
         FramedNixReader {
             read_buffer,

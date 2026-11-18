@@ -13,7 +13,7 @@ mod wire;
 use wire::ProtocolVersion;
 
 use crate::{
-    framed_reader::FramedNixReader,
+    framed_reader::{FramedNixReader, FramedNixWriter},
     wire::{
         Nar, NixDeserialize, NixError, NixSerialize as _, Operation, StorePath, Trust,
         UnkeyedValidPathInfo,
@@ -37,7 +37,7 @@ struct NixClient<RW> {
     daemon_nix_version: String,
     trust: Trust,
     nix_socket_r: FramedNixReader<ReadHalf<RW>>,
-    nix_socket_w: WriteHalf<RW>,
+    nix_socket_w: FramedNixWriter<WriteHalf<RW>>,
 }
 
 impl<RW> fmt::Debug for NixClient<RW> {
@@ -97,6 +97,7 @@ where
 
         let (nix_socket_r, nix_socket_w) = tokio::io::split(nix_socket);
         let mut nix_socket_r = FramedNixReader::new(nix_socket_r);
+        let mut nix_socket_w = FramedNixWriter::new(nix_socket_w);
 
         let daemon_nix_version = nix_socket_r
             .nom_read::<String>(protocol_version)
@@ -176,15 +177,17 @@ where
         &mut self,
         store_path: &StorePath,
     ) -> Result<Option<UnkeyedValidPathInfo>, Box<dyn Error + Send + Sync>> {
-        let mut bytes_mut = BytesMut::new();
-        Operation::QueryPathInfo.serialize(self.protocol_version, &mut bytes_mut);
-        self.nix_socket_w.write_all_buf(&mut bytes_mut).await?;
+        self.nix_socket_w
+            .write(self.protocol_version, &Operation::QueryPathInfo)
+            .await
+            .unwrap();
 
-        let mut store_path_buf = BytesMut::new();
-        store_path.serialize(self.protocol_version, &mut store_path_buf);
-        self.nix_socket_w.write_all_buf(&mut store_path_buf).await?;
+        self.nix_socket_w
+            .write(self.protocol_version, store_path)
+            .await
+            .unwrap();
 
-        self.nix_socket_w.flush().await?;
+        self.nix_socket_w.flush().await.unwrap();
 
         self.flush_logs().await?;
 
@@ -207,15 +210,17 @@ where
         &mut self,
         store_path: &StorePath,
     ) -> Result<Nar, Box<dyn Error + Send + Sync>> {
-        let mut bytes_mut = BytesMut::new();
-        Operation::NarFromPath.serialize(self.protocol_version, &mut bytes_mut);
-        self.nix_socket_w.write_all_buf(&mut bytes_mut).await?;
+        self.nix_socket_w
+            .write(self.protocol_version, &Operation::NarFromPath)
+            .await
+            .unwrap();
 
-        let mut store_path_buf = BytesMut::new();
-        store_path.serialize(self.protocol_version, &mut store_path_buf);
-        self.nix_socket_w.write_all_buf(&mut store_path_buf).await?;
+        self.nix_socket_w
+            .write(self.protocol_version, store_path)
+            .await
+            .unwrap();
 
-        self.nix_socket_w.flush().await?;
+        self.nix_socket_w.flush().await.unwrap();
 
         self.flush_logs().await?;
 
@@ -225,6 +230,55 @@ where
             .await
             .unwrap();
         Ok(decoder)
+    }
+
+    async fn add_to_store_nar(
+        &mut self,
+        info: &wire::ValidPathInfo,
+        repair: bool,
+        dont_check_sigs: bool,
+        nar: &Nar,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.protocol_version < ProtocolVersion::from_parts(1, 23) {
+            panic!("protocol version < 1.23 isn't supported for \"add_to_store_nar\"")
+        }
+
+        self.nix_socket_w
+            .write(self.protocol_version, &Operation::NarFromPath)
+            .await
+            .unwrap();
+
+        self.nix_socket_w
+            .write(self.protocol_version, info)
+            .await
+            .unwrap();
+
+        self.nix_socket_w
+            .write(self.protocol_version, &repair)
+            .await
+            .unwrap();
+
+        self.nix_socket_w
+            .write(self.protocol_version, &dont_check_sigs)
+            .await
+            .unwrap();
+
+        let bytes = nar.bytes.as_slice();
+
+        self.nix_socket_w
+            .write(self.protocol_version, &wire::bytes::Unpadded(&bytes[..]))
+            .await
+            .unwrap();
+        self.nix_socket_w
+            .write(self.protocol_version, &0u64)
+            .await
+            .unwrap();
+
+        self.nix_socket_w.flush().await.unwrap();
+
+        self.flush_logs().await?;
+
+        Ok(())
     }
 }
 
@@ -293,8 +347,18 @@ mod tests {
             "/nix/store/7fppvgqxs3zxhvrpqnmwydn70bzgbnnx-rustc-wrapper-1.95.0",
         )?;
 
-        let nar_bytes = nix_client.nar_from_path(&store_path).await?;
-        println!("length nar_bytes: {}", nar_bytes.bytes.len());
+        let path_info = nix_client.query_path_info(&store_path).await?.unwrap();
+        let nar = nix_client.nar_from_path(&store_path).await?;
+        println!("length nar_bytes: {}", nar.bytes.len());
+
+        nix_client
+            .add_to_store_nar(
+                &wire::ValidPathInfo::new(store_path, path_info),
+                true,
+                false,
+                &nar,
+            )
+            .await?;
 
         Ok(())
     }

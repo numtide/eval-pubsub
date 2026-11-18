@@ -35,12 +35,11 @@ impl<'a> NixDeserialize<'a> for UnkeyedValidPathInfo {
         let (input, references) =
             <Vec<StorePath> as NixDeserialize>::deserialize(protocol_version, input)?;
         let (input, registration_time) = Time::deserialize(protocol_version, input)?;
-        let (input, nar_size) = nom::number::le_u64().parse(input)?;
+        let (input, nar_size) = u64::deserialize(protocol_version, input)?;
 
         let (input, (ultimate, signatures, ca)) =
             if protocol_version >= ProtocolVersion::from_parts(1, 16) {
-                let (input, ultimate) = nom::number::le_u64().parse(input)?;
-                let ultimate = ultimate > 0;
+                let (input, ultimate) = bool::deserialize(protocol_version, input)?;
                 let (input, signatures) =
                     <Vec<Signature> as NixDeserialize>::deserialize(protocol_version, input)?;
                 let (input, ca) = String::deserialize(protocol_version, input)?;
@@ -78,13 +77,11 @@ impl NixSerialize for UnkeyedValidPathInfo {
         self.nar_hash.serialize(protocol_version, bytes);
         self.references.serialize(protocol_version, bytes);
         self.registration_time.serialize(protocol_version, bytes);
-        bytes.put_u64_le(self.nar_size);
+        self.nar_size.serialize(protocol_version, bytes);
         if protocol_version >= ProtocolVersion::from_parts(1, 16) {
-            bytes.put_u64_le(if self.ultimate.expect("valid ultimate") {
-                1
-            } else {
-                0
-            });
+            self.ultimate
+                .expect("valid ultimate")
+                .serialize(protocol_version, bytes);
 
             self.signatures
                 .as_ref()

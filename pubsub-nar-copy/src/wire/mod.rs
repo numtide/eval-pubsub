@@ -1,4 +1,4 @@
-mod bytes;
+pub mod bytes;
 mod error;
 mod nar;
 mod nar_hash;
@@ -14,10 +14,11 @@ mod time;
 mod trace_line;
 mod trust;
 mod unkeyed_valid_path_info;
+mod valid_path_info;
 mod verbosity;
 
-use ::bytes::BytesMut;
-use nom::IResult;
+use ::bytes::{BufMut, BytesMut};
+use nom::{IResult, Parser as _};
 
 pub use error::*;
 pub use nar::*;
@@ -32,6 +33,7 @@ pub use time::*;
 pub use trace_line::*;
 pub use trust::*;
 pub use unkeyed_valid_path_info::*;
+pub use valid_path_info::*;
 pub use verbosity::*;
 
 pub trait NixDeserialize<'a>
@@ -46,4 +48,30 @@ where
     Self: Sized,
 {
     fn serialize(&self, protocol_version: ProtocolVersion, bytes: &mut BytesMut);
+}
+
+impl NixDeserialize<'_> for bool {
+    fn deserialize(_protocol_version: ProtocolVersion, input: &'_ [u8]) -> IResult<&'_ [u8], Self> {
+        let (input, ultimate) = nom::number::le_u64().parse(input)?;
+        Ok((input, ultimate > 0))
+    }
+}
+
+impl NixSerialize for bool {
+    fn serialize(&self, _protocol_version: ProtocolVersion, bytes: &mut BytesMut) {
+        bytes.put_u64_le(if *self { 1 } else { 0 })
+    }
+}
+
+impl NixDeserialize<'_> for u64 {
+    fn deserialize(_protocol_version: ProtocolVersion, input: &'_ [u8]) -> IResult<&'_ [u8], Self> {
+        let (input, value) = nom::number::le_u64().parse(input)?;
+        Ok((input, value))
+    }
+}
+
+impl NixSerialize for u64 {
+    fn serialize(&self, _protocol_version: ProtocolVersion, bytes: &mut BytesMut) {
+        bytes.put_u64_le(*self)
+    }
 }
