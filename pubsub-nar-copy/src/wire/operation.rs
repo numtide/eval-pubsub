@@ -121,7 +121,7 @@ impl From<Operation> for u64 {
     }
 }
 
-impl NixDeserialize for Operation {
+impl<'a> NixDeserialize<'a> for Operation {
     fn deserialize(_protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Self> {
         let (input, operation) = nom::number::u64(Endianness::Little).parse(input)?;
 

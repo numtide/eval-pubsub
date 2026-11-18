@@ -69,7 +69,7 @@ impl ProtocolVersion {
     }
 }
 
-impl NixDeserialize for ProtocolVersion {
+impl<'a> NixDeserialize<'a> for ProtocolVersion {
     fn deserialize(_protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Self> {
         let (input, major_minor) = nom::number::u64(Endianness::Little).parse(input)?;
 

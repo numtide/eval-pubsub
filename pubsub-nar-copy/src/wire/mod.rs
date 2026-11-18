@@ -1,5 +1,6 @@
 mod bytes;
 mod error;
+mod nar;
 mod nar_hash;
 mod operation;
 mod opt_store_path;
@@ -19,6 +20,7 @@ use ::bytes::BytesMut;
 use nom::IResult;
 
 pub use error::*;
+pub use nar::*;
 pub use nar_hash::*;
 pub use operation::*;
 pub use opt_store_path::*;
@@ -32,11 +34,11 @@ pub use trust::*;
 pub use unkeyed_valid_path_info::*;
 pub use verbosity::*;
 
-pub trait NixDeserialize
+pub trait NixDeserialize<'a>
 where
     Self: Sized,
 {
-    fn deserialize(protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Self>;
+    fn deserialize(protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self>;
 }
 
 pub trait NixSerialize

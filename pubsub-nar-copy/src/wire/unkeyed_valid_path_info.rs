@@ -25,11 +25,11 @@ pub struct UnkeyedValidPathInfo {
     ca: Option<String>,
 }
 
-impl NixDeserialize for UnkeyedValidPathInfo {
+impl<'a> NixDeserialize<'a> for UnkeyedValidPathInfo {
     fn deserialize(
         protocol_version: ProtocolVersion,
-        input: &[u8],
-    ) -> IResult<&[u8], UnkeyedValidPathInfo> {
+        input: &'a [u8],
+    ) -> IResult<&'a [u8], UnkeyedValidPathInfo> {
         let (input, deriver) = OptStorePath::deserialize(protocol_version, input)?;
         let (input, nar_hash) = NarHash::deserialize(protocol_version, input)?;
         let (input, references) =

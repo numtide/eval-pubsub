@@ -27,8 +27,11 @@ impl NarHash {
     }
 }
 
-impl NixDeserialize for NarHash {
-    fn deserialize(protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], NarHash> {
+impl<'a> NixDeserialize<'a> for NarHash {
+    fn deserialize(
+        protocol_version: ProtocolVersion,
+        input: &'a [u8],
+    ) -> IResult<&'a [u8], NarHash> {
         let (input, string) = String::deserialize(protocol_version, input)?;
 
         let hash = base16::decode(&string).unwrap();

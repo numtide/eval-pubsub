@@ -6,8 +6,11 @@ use crate::{
     wire::{self, NixDeserialize, NixSerialize},
 };
 
-impl NixDeserialize for String {
-    fn deserialize(protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], String> {
+impl<'a> NixDeserialize<'a> for String {
+    fn deserialize(
+        protocol_version: ProtocolVersion,
+        input: &'a [u8],
+    ) -> IResult<&'a [u8], String> {
         let (input, bytes) = <Vec<u8>>::deserialize(protocol_version, input)?;
 
         Ok((input, String::from_utf8(bytes).unwrap()))

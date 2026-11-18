@@ -10,11 +10,11 @@ pub struct NixError {
     traces: Vec<TraceLine>,
 }
 
-impl NixDeserialize for NixError {
+impl<'a> NixDeserialize<'a> for NixError {
     fn deserialize(
         protocol_version: super::ProtocolVersion,
-        input: &[u8],
-    ) -> nom::IResult<&[u8], Self> {
+        input: &'a [u8],
+    ) -> nom::IResult<&'a [u8], Self> {
         let (input, r#type) = String::deserialize(protocol_version, input)?;
         let (input, level) = Verbosity::deserialize(protocol_version, input)?;
         let (input, name) = String::deserialize(protocol_version, input)?;

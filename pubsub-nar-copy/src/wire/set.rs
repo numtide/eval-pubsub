@@ -6,11 +6,14 @@ use crate::{
     wire::{NixDeserialize, NixSerialize},
 };
 
-impl<I> NixDeserialize for Vec<I>
+impl<'a, I> NixDeserialize<'a> for Vec<I>
 where
-    I: NixDeserialize,
+    I: NixDeserialize<'a>,
 {
-    fn deserialize(protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Vec<I>> {
+    fn deserialize(
+        protocol_version: ProtocolVersion,
+        input: &'a [u8],
+    ) -> IResult<&'a [u8], Vec<I>> {
         let (mut input, size) = nom::number::le_u64().parse(input)?;
         let mut set = Vec::with_capacity(size as usize);
 

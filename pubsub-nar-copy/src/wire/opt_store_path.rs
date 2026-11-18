@@ -21,8 +21,8 @@ impl TryFrom<&str> for OptStorePath {
     }
 }
 
-impl NixDeserialize for OptStorePath {
-    fn deserialize(protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Self> {
+impl<'a> NixDeserialize<'a> for OptStorePath {
+    fn deserialize(protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
         let (input, string) = String::deserialize(protocol_version, input)?;
         if string.is_empty() {
             Ok((input, OptStorePath::Nothing))

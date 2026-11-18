@@ -12,8 +12,8 @@ impl Time {
     }
 }
 
-impl NixDeserialize for Time {
-    fn deserialize(_protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Self> {
+impl<'a> NixDeserialize<'a> for Time {
+    fn deserialize(_protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
         let (input, time) = nom::number::le_u64().parse(input)?;
 
         Ok((input, Self(time)))

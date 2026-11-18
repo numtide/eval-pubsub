@@ -3,16 +3,16 @@ use nom::{IResult, Parser as _, number::Endianness};
 
 use crate::wire::{NixDeserialize, NixSerialize, ProtocolVersion};
 
-impl NixDeserialize for BytesMut {
-    fn deserialize(protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Self> {
+impl<'a> NixDeserialize<'a> for BytesMut {
+    fn deserialize(protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
         let (input, vec) = <Vec<u8>>::deserialize(protocol_version, input)?;
 
         Ok((input, BytesMut::from_iter(vec)))
     }
 }
 
-impl NixDeserialize for Vec<u8> {
-    fn deserialize(_protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Self> {
+impl<'a> NixDeserialize<'a> for Vec<u8> {
+    fn deserialize(_protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
         let (input, size) = nom::number::u64(Endianness::Little).parse(input)?;
         let padding = calculate_padding(size);
 
@@ -25,8 +25,8 @@ impl NixDeserialize for Vec<u8> {
     }
 }
 
-impl NixDeserialize for Bytes {
-    fn deserialize(protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Self> {
+impl<'a> NixDeserialize<'a> for Bytes {
+    fn deserialize(protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
         let (input, bytes_mut) = BytesMut::deserialize(protocol_version, input)?;
 
         Ok((input, bytes_mut.freeze()))

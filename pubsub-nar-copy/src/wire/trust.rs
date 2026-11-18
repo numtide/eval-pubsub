@@ -42,8 +42,8 @@ impl NixSerialize for Trust {
     }
 }
 
-impl NixDeserialize for Trust {
-    fn deserialize(protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Self> {
+impl<'a> NixDeserialize<'a> for Trust {
+    fn deserialize(protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
         let (input, trust) = nom::number::le_u64().parse(input)?;
 
         Ok((input, Self::try_from(trust).unwrap()))

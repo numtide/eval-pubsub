@@ -47,7 +47,7 @@ impl TryFrom<u64> for Verbosity {
     }
 }
 
-impl NixDeserialize for Verbosity {
+impl<'a> NixDeserialize<'a> for Verbosity {
     fn deserialize(
         _protocol_version: super::ProtocolVersion,
         input: &[u8],

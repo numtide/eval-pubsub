@@ -77,8 +77,8 @@ impl StorePath {
     }
 }
 
-impl NixDeserialize for StorePath {
-    fn deserialize(protocol_version: ProtocolVersion, input: &[u8]) -> IResult<&[u8], Self> {
+impl<'a> NixDeserialize<'a> for StorePath {
+    fn deserialize(protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
         let (input, string) = String::deserialize(protocol_version, input)?;
 
         Ok((input, string.as_str().try_into().expect("no error")))

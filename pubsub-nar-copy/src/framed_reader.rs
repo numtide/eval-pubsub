@@ -35,7 +35,7 @@ where
 
     pub async fn nom_read<A>(&mut self, protocol_version: ProtocolVersion) -> Result<A, ()>
     where
-        A: NixDeserialize,
+        A: for<'a> NixDeserialize<'a>,
     {
         loop {
             match A::deserialize(protocol_version, &self.read_buffer) {

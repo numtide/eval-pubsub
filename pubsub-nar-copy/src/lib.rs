@@ -15,7 +15,7 @@ use wire::ProtocolVersion;
 use crate::{
     framed_reader::FramedNixReader,
     wire::{
-        NixDeserialize, NixError, NixSerialize as _, Operation, StorePath, Trust,
+        Nar, NixDeserialize, NixError, NixSerialize as _, Operation, StorePath, Trust,
         UnkeyedValidPathInfo,
     },
 };
@@ -177,12 +177,13 @@ where
         store_path: &StorePath,
     ) -> Result<Option<UnkeyedValidPathInfo>, Box<dyn Error + Send + Sync>> {
         let mut bytes_mut = BytesMut::new();
-
         Operation::QueryPathInfo.serialize(self.protocol_version, &mut bytes_mut);
-        self.nix_socket_w.write_buf(&mut bytes_mut).await?;
+        self.nix_socket_w.write_all_buf(&mut bytes_mut).await?;
+
         let mut store_path_buf = BytesMut::new();
         store_path.serialize(self.protocol_version, &mut store_path_buf);
         self.nix_socket_w.write_all_buf(&mut store_path_buf).await?;
+
         self.nix_socket_w.flush().await?;
 
         self.flush_logs().await?;
@@ -200,6 +201,30 @@ where
         } else {
             Ok(None)
         }
+    }
+
+    async fn nar_from_path(
+        &mut self,
+        store_path: &StorePath,
+    ) -> Result<Nar, Box<dyn Error + Send + Sync>> {
+        let mut bytes_mut = BytesMut::new();
+        Operation::NarFromPath.serialize(self.protocol_version, &mut bytes_mut);
+        self.nix_socket_w.write_all_buf(&mut bytes_mut).await?;
+
+        let mut store_path_buf = BytesMut::new();
+        store_path.serialize(self.protocol_version, &mut store_path_buf);
+        self.nix_socket_w.write_all_buf(&mut store_path_buf).await?;
+
+        self.nix_socket_w.flush().await?;
+
+        self.flush_logs().await?;
+
+        let decoder: Nar = self
+            .nix_socket_r
+            .nom_read(self.protocol_version)
+            .await
+            .unwrap();
+        Ok(decoder)
     }
 }
 
@@ -235,9 +260,18 @@ mod tests {
     #[tokio::test]
     async fn handshake() -> Result<(), Box<dyn Error + Send + Sync>> {
         let nix_socket = NixClient::connect_unix_default().await.unwrap();
-        let mut nix_client = NixClient::handshake(nix_socket).await?;
+        let nix_client = NixClient::handshake(nix_socket).await?;
 
         println!("nix_client: {:?}", nix_client);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_closure() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let nix_socket = NixClient::connect_unix_default().await.unwrap();
+        let mut nix_client = NixClient::handshake(nix_socket).await?;
+
         let store_path = StorePath::try_from(
             "/nix/store/7fppvgqxs3zxhvrpqnmwydn70bzgbnnx-rustc-wrapper-1.95.0",
         )?;
@@ -246,6 +280,21 @@ mod tests {
         for item in closure {
             println!("- {}", item);
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_nar() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let nix_socket = NixClient::connect_unix_default().await.unwrap();
+        let mut nix_client = NixClient::handshake(nix_socket).await?;
+
+        let store_path = StorePath::try_from(
+            "/nix/store/7fppvgqxs3zxhvrpqnmwydn70bzgbnnx-rustc-wrapper-1.95.0",
+        )?;
+
+        let nar_bytes = nix_client.nar_from_path(&store_path).await?;
+        println!("length nar_bytes: {}", nar_bytes.bytes.len());
 
         Ok(())
     }
