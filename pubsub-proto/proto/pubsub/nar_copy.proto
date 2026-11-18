@@ -7,21 +7,27 @@ import "common.proto";
 service NarCopy {
   rpc DownloadNarInfo(DownloadNarInfoRequest) returns (DownloadNarInfoResponse) {}
   rpc DownloadNar(DownloadNarRequest) returns (stream DownloadNarResponse) {}
+
+  rpc UploadNar(stream UploadNarRequest) returns (UploadNarResponse) {}
 }
 
 message DownloadNarInfoRequest {
   string hash = 1;
 }
 
-message DownloadNarInfoResponse {
+message NarInfo {
   string store_path = 1;
   string nar_hash = 2;
   uint64 nar_size = 3;
   repeated string reference = 4;
   // optional
-  string deriver = 5;
+  optional string deriver = 5;
   repeated string signature = 6;
-  string ca = 7;
+  optional string ca = 7;
+}
+
+message DownloadNarInfoResponse {
+  NarInfo nar_info = 1;
 }
 
 message DownloadNarRequest {
@@ -29,7 +35,22 @@ message DownloadNarRequest {
   uint64 chunk_size = 2;
 }
 
-message DownloadNarResponse {
+message NarChunk {
   uint64 offset = 1;
   bytes body = 2;
+}
+
+message DownloadNarResponse {
+  NarChunk nar_chunk = 1;
+}
+
+message UploadNarRequest {
+  oneof type {
+    NarChunk nar_chunk = 1;
+    NarInfo nar_info = 2;
+  }
+}
+
+message UploadNarResponse {
+
 }

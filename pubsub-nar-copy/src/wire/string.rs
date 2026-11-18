@@ -2,7 +2,7 @@ use bytes::BytesMut;
 use nom::IResult;
 
 use crate::{
-    ProtocolVersion,
+    wire::ProtocolVersion,
     wire::{self, NixDeserialize, NixSerialize},
 };
 

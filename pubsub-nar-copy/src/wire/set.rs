@@ -2,7 +2,7 @@ use bytes::{BufMut, BytesMut};
 use nom::{IResult, Parser as _};
 
 use crate::{
-    ProtocolVersion,
+    wire::ProtocolVersion,
     wire::{NixDeserialize, NixSerialize},
 };
 

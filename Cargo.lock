@@ -1442,6 +1442,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "log",
+ "pubsub-nar-copy",
  "pubsub-proto",
  "serde",
  "serde_json",

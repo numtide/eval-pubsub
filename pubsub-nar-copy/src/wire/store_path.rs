@@ -4,12 +4,14 @@ use bytes::{BufMut as _, BytesMut};
 use nix_base32::{from_nix_base32, to_nix_base32};
 use nom::{AsBytes, IResult, Parser as _, number::Endianness};
 
-use crate::wire::{self, NixDeserialize, NixSerialize, ProtocolVersion, protocol_version};
+use crate::wire::{
+    self, NixDeserialize, NixSerialize, ProtocolVersion, StorePathHash, protocol_version,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StorePath {
     pub store_dir: Option<String>,
-    pub hash: [u8; 20],
+    pub hash: StorePathHash,
     pub name: String,
 }
 
@@ -43,7 +45,7 @@ impl TryFrom<&str> for StorePath {
 
 impl From<&StorePath> for String {
     fn from(value: &StorePath) -> Self {
-        let encoded_hash = to_nix_base32(&value.hash);
+        let encoded_hash: String = (&value.hash).into();
 
         if let Some(store_dir) = &value.store_dir {
             format!("{}/{}-{}", store_dir, encoded_hash, value.name)
@@ -55,7 +57,7 @@ impl From<&StorePath> for String {
 
 impl Display for StorePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let encoded_hash = to_nix_base32(&self.hash);
+        let encoded_hash: String = (&self.hash).into();
 
         if let Some(store_dir) = &self.store_dir {
             write!(f, "{}/{}-{}", store_dir, encoded_hash, self.name)
@@ -93,7 +95,7 @@ impl NixSerialize for StorePath {
             size += store_dir.as_bytes().len() + 1;
         }
 
-        let encoded_hash = to_nix_base32(&self.hash);
+        let encoded_hash: String = (&self.hash).into();
 
         size += encoded_hash.as_bytes().len();
         size += 1 + self.name.as_bytes().len();

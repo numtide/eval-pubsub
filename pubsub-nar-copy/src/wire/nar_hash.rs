@@ -8,6 +8,12 @@ use crate::wire::{self, NixDeserialize, NixSerialize, ProtocolVersion};
 #[derive(PartialEq, Copy, Clone, Debug, Eq)]
 pub struct NarHash([u8; 32]);
 
+impl From<&NarHash> for String {
+    fn from(value: &NarHash) -> Self {
+        base16::encode_lower(&value.0)
+    }
+}
+
 impl NarHash {
     pub fn new_from_base64<B>(hash: B) -> Self
     where

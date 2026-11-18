@@ -10,6 +10,21 @@ pub struct Signature {
     signature: Bytes,
 }
 
+impl From<&Signature> for String {
+    fn from(value: &Signature) -> Self {
+        let mut signature = std::io::Cursor::new(Vec::new());
+        let signature = base64::write::EncoderWriter::new(
+            signature,
+            &base64::engine::general_purpose::STANDARD,
+        )
+        .finish()
+        .unwrap();
+
+        let signature = unsafe { String::from_utf8_unchecked(signature.into_inner()) };
+        format!("{}:{}", value.name, signature)
+    }
+}
+
 impl TryFrom<&str> for Signature {
     type Error = ();
 

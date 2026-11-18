@@ -10,6 +10,10 @@ pub mod pubsub {
     pub mod common {
         tonic::include_proto!("pubsub.common");
     }
+
+    pub mod nar_copy {
+        tonic::include_proto!("pubsub.nar_copy");
+    }
 }
 
 use pubsub::*;

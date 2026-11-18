@@ -1,7 +1,4 @@
-use bytes::{Buf, BufMut as _, BytesMut};
-use display_bytes::{DisplayBytesConfig, FormatBase64};
-use futures::io::Cursor;
-use replace_with::replace_with_or_abort;
+use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::wire::{NixDeserialize, NixSerialize, ProtocolVersion};

@@ -15,14 +15,14 @@ use crate::wire::Time;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnkeyedValidPathInfo {
-    deriver: OptStorePath,
-    nar_hash: NarHash,
+    pub deriver: OptStorePath,
+    pub nar_hash: NarHash,
     pub references: Vec<StorePath>,
-    registration_time: Time,
-    nar_size: u64,
-    ultimate: Option<bool>,
-    signatures: Option<Vec<Signature>>,
-    ca: Option<String>,
+    pub registration_time: Time,
+    pub nar_size: u64,
+    pub ultimate: Option<bool>,
+    pub signatures: Option<Vec<Signature>>,
+    pub ca: Option<String>,
 }
 
 impl<'a> NixDeserialize<'a> for UnkeyedValidPathInfo {

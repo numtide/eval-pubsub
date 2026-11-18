@@ -2,8 +2,8 @@ use crate::wire::{NixDeserialize, NixSerialize, StorePath, UnkeyedValidPathInfo}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidPathInfo {
-    path: StorePath,
-    info: UnkeyedValidPathInfo,
+    pub path: StorePath,
+    pub info: UnkeyedValidPathInfo,
 }
 
 impl ValidPathInfo {
