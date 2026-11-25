@@ -8,6 +8,7 @@ pub mod submitter;
 use std::path::PathBuf;
 
 use clap::Parser;
+use pubsub_nar_copy::nix_client::{self, NixClient};
 use tokio::sync::mpsc;
 
 use crate::{executor::Executor, submitter::Submitter};
@@ -34,7 +35,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::init();
     let args = Args::parse();
 
@@ -44,8 +45,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("starting builder {}", builder_uuid);
 
     let (offers_sender, offers_receiver) = mpsc::channel(256);
-    for uri in args.submitters {
-        let submitter = Submitter::connect_lazy(uri, builder_uuid)?;
+    for uri in &args.submitters {
+        let submitter = Submitter::connect_lazy(uri.clone(), builder_uuid)?;
         tokio::spawn(submitter::run(
             submitter,
             builder_information.clone(),
@@ -54,8 +55,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     drop(offers_sender);
 
+    let nix_client = nix_client::deadpool::Manager::builder(NixClient::default_path()).build()?;
+
+    let mut nar_copy_clients = Vec::with_capacity(args.submitters.len());
+    for uri in args.submitters {
+        nar_copy_clients.push(pubsub_nar_copy::client::Client::new(uri).await?);
+    }
+
     scheduler::run(
-        Executor::new(args.nix_eval_jobs),
+        Executor::new(args.nix_eval_jobs, nix_client, nar_copy_clients),
         args.max_jobs,
         offers_receiver,
     )

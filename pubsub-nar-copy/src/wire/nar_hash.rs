@@ -14,6 +14,24 @@ impl From<&NarHash> for String {
     }
 }
 
+impl TryFrom<String> for NarHash {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        TryFrom::try_from(&value)
+    }
+}
+
+impl TryFrom<&String> for NarHash {
+    type Error = String;
+
+    fn try_from(value: &String) -> Result<Self, Self::Error> {
+        let vec = base16::decode(value.as_str()).map_err(|err| err.to_string())?;
+        let array = vec.try_into().map_err(|err| format!("{:?}", err))?;
+        Ok(NarHash(array))
+    }
+}
+
 impl NarHash {
     pub fn new_from_base64<B>(hash: B) -> Self
     where

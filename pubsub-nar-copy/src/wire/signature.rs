@@ -56,6 +56,14 @@ impl TryFrom<&str> for Signature {
     }
 }
 
+impl TryFrom<String> for Signature {
+    type Error = ();
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        TryFrom::try_from(value.as_str())
+    }
+}
+
 impl Signature {
     pub fn new<S>(name: S, signature: Bytes) -> Signature
     where

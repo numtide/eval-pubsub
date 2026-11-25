@@ -10,8 +10,10 @@ pub mod schema;
 mod tests;
 
 use clap::Parser as _;
+use pubsub_nar_copy::server::NarCopyService;
 use pubsub_proto::pubsub::{
-    client::pub_sub_client_server::PubSubClientServer, server::pub_sub_server::PubSubServer,
+    client::pub_sub_client_server::PubSubClientServer, nar_copy::nar_copy_server::NarCopyServer,
+    server::pub_sub_server::PubSubServer,
 };
 use tokio::net::TcpListener;
 use tonic::{service::Routes, transport::Server};
@@ -33,9 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let server = PubSubServer::new(svc.clone());
     let client_server = PubSubClientServer::new(svc);
+    let nar_copy_server = NarCopyServer::new(NarCopyService::new_default_socket().await?);
     let mut routes = Routes::builder();
     routes.add_service(client_server.clone());
     routes.add_service(server.clone());
+    routes.add_service(nar_copy_server);
     let axum_router = routes.routes().into_axum_router();
     futures::future::join_all(cli.listen_address.into_iter().map(|addr| {
         let axum_router = axum_router.clone();

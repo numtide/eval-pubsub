@@ -8,4 +8,4 @@ members = [
   "pubsub-proto",
   "pubsub-submitter",
   "pubsub-nar-copy"
-]
+, "pubsub-util"]

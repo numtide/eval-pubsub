@@ -1,0 +1,228 @@
+use bytes::{BufMut as _, BytesMut};
+use pubsub_proto::pubsub::nar_copy::{self, nar_copy_server};
+use pubsub_util::job_set::JobSet;
+use std::sync::Arc;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::UnixStream,
+    sync::{RwLock, mpsc},
+};
+use tokio_stream::wrappers::ReceiverStream;
+
+use crate::{
+    nix_client::NixClient,
+    wire::{self, ValidPathInfo},
+};
+
+impl From<wire::ValidPathInfo> for nar_copy::NarInfo {
+    fn from(value: wire::ValidPathInfo) -> Self {
+        nar_copy::NarInfo {
+            store_path: (&value.path).into(),
+            nar_hash: (&value.info.nar_hash).into(),
+            nar_size: value.info.nar_size,
+            reference: value
+                .info
+                .references
+                .iter()
+                .map(|store_path| store_path.into())
+                .collect(),
+            deriver: value.info.deriver.into(),
+            signature: match value.info.signatures {
+                Some(signatures) => signatures
+                    .iter()
+                    .map(|signature| signature.into())
+                    .collect(),
+                None => Vec::new(),
+            },
+            ca: value.info.ca,
+        }
+    }
+}
+
+impl TryFrom<nar_copy::NarInfo> for wire::ValidPathInfo {
+    type Error = ();
+
+    fn try_from(value: nar_copy::NarInfo) -> Result<Self, Self::Error> {
+        Ok(Self {
+            path: value.store_path.try_into().unwrap(),
+            info: wire::UnkeyedValidPathInfo {
+                deriver: match value.deriver {
+                    Some(deriver) => deriver.try_into().unwrap(),
+                    None => wire::OptStorePath::Nothing,
+                },
+                nar_hash: value.nar_hash.try_into().unwrap(),
+                references: value
+                    .reference
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_, _>>()
+                    .unwrap(),
+                registration_time: 0.into(),
+                nar_size: value.nar_size,
+                ultimate: Some(false),
+                signatures: if value.signature.is_empty() {
+                    None
+                } else {
+                    Some(
+                        value
+                            .signature
+                            .into_iter()
+                            .map(TryInto::try_into)
+                            .collect::<Result<_, _>>()
+                            .unwrap(),
+                    )
+                },
+                ca: value.ca,
+            },
+        })
+    }
+}
+
+pub struct NarCopyService<RW> {
+    nix_client: Arc<RwLock<NixClient<RW>>>,
+    job_set: JobSet,
+}
+
+impl NarCopyService<UnixStream> {
+    pub async fn new_default_socket() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let nix_socket = NixClient::connect_unix_default().await.unwrap();
+        let nix_client = NixClient::handshake(nix_socket).await?;
+
+        Ok(Self {
+            nix_client: Arc::new(RwLock::new(nix_client)),
+            job_set: JobSet::new(),
+        })
+    }
+}
+
+#[tonic::async_trait]
+impl<RW> nar_copy_server::NarCopy for NarCopyService<RW>
+where
+    RW: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    async fn download_nar_info(
+        &self,
+        request: tonic::Request<nar_copy::DownloadNarInfoRequest>,
+    ) -> std::result::Result<tonic::Response<nar_copy::DownloadNarInfoResponse>, tonic::Status>
+    {
+        let hash: wire::StorePathHash = request.into_inner().hash.try_into().expect("valid hash");
+
+        log::debug!("resolving hash {:?}", hash);
+
+        let path = self
+            .nix_client
+            .write()
+            .await
+            .query_path_from_hash_part(hash)
+            .await
+            .unwrap()
+            .unwrap();
+
+        log::debug!("resolving path {}", path);
+
+        let info = self
+            .nix_client
+            .write()
+            .await
+            .query_path_info(&path)
+            .await
+            .unwrap()
+            .unwrap();
+
+        Ok(tonic::Response::new(nar_copy::DownloadNarInfoResponse {
+            nar_info: Some((ValidPathInfo { path, info }).into()),
+        }))
+    }
+
+    type DownloadNarStream = ReceiverStream<Result<nar_copy::DownloadNarResponse, tonic::Status>>;
+    async fn download_nar(
+        &self,
+        request: tonic::Request<nar_copy::DownloadNarRequest>,
+    ) -> std::result::Result<tonic::Response<Self::DownloadNarStream>, tonic::Status> {
+        let request = request.into_inner();
+        let hash: wire::StorePathHash = request.hash.try_into().expect("valid hash");
+        let chunk_size: u64 = request.chunk_size;
+
+        let path = self
+            .nix_client
+            .write()
+            .await
+            .query_path_from_hash_part(hash)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let nar = self
+            .nix_client
+            .write()
+            .await
+            .nar_from_path(&path)
+            .await
+            .unwrap();
+
+        let (tx, rx) = mpsc::channel(1);
+
+        self.job_set
+            .spawn(
+                "download_nar",
+                async move {
+                    for (ix, chunk) in nar.bytes.chunks(chunk_size as usize).enumerate() {
+                        tx.send(Ok(nar_copy::DownloadNarResponse {
+                            nar_chunk: Some(nar_copy::NarChunk {
+                                offset: ix as u64 * chunk_size,
+                                body: chunk.to_vec(),
+                            }),
+                        }))
+                        .await
+                        .unwrap();
+                    }
+                },
+                async {},
+            )
+            .await;
+
+        Ok(tonic::Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn upload_nar(
+        &self,
+        request: tonic::Request<tonic::Streaming<nar_copy::UploadNarRequest>>,
+    ) -> std::result::Result<tonic::Response<nar_copy::UploadNarResponse>, tonic::Status> {
+        let mut request = request.into_inner();
+
+        if let Ok(Some(nar_copy::UploadNarRequest {
+            r#type: Some(nar_copy::upload_nar_request::Type::NarInfo(nar_info)),
+        })) = request.message().await
+        {
+            let nar_info: wire::ValidPathInfo = nar_info.try_into().unwrap();
+            let mut nar_buf: BytesMut = BytesMut::new();
+            nar_buf.resize(nar_info.info.nar_size as usize, 0);
+
+            while let Ok(Some(message)) = request.message().await {
+                match message.r#type {
+                    Some(nar_copy::upload_nar_request::Type::NarChunk(nar_chunk)) => {
+                        // TODO slow, copying and needless allocation
+                        let start = nar_chunk.offset as usize;
+                        let end = nar_chunk.offset as usize + nar_chunk.body.len();
+                        let mut writer = nar_buf[start..end].writer();
+                        std::io::copy(&mut nar_chunk.body.as_slice(), &mut writer).unwrap();
+                    }
+                    _ => todo!(),
+                }
+            }
+
+            let nar: Vec<u8> = nar_buf.into();
+            let nar: wire::Nar = nar.into();
+            self.nix_client
+                .write()
+                .await
+                .add_to_store_nar(&nar_info, false, false, &nar)
+                .await
+                .unwrap();
+
+            Ok(tonic::Response::new(nar_copy::UploadNarResponse {}))
+        } else {
+            todo!()
+        }
+    }
+}

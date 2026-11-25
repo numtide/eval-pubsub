@@ -1,3 +1,4 @@
+use pubsub_nar_copy::{nix_client, wire};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -24,4 +25,8 @@ impl GrpcError {
 pub enum Error {
     #[error("GRPC {0}")]
     Grpc(#[from] GrpcError),
+    #[error("failed to fetch closure of flake ref {0:?}")]
+    FailedToFetchClosure(String),
+    #[error("{0}")]
+    NixClient(#[from] nix_client::Error),
 }

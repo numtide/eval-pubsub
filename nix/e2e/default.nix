@@ -54,6 +54,10 @@ pkgs.testers.runNixOSTest {
 
       virtualisation.cores = 4;
 
+      nix.settings = {
+        trusted-users = [ "pubsub-builder" ];
+      };
+
       services.postgresql = {
         enable = true;
         package = pkgs.postgresql_18;
@@ -66,6 +70,7 @@ pkgs.testers.runNixOSTest {
         ];
       };
 
+      systemd.services."pubsub-submitter".environment."RUST_BACKTRACE" = "1";
       services.pubsub.submitter = {
         enable = true;
         openFirewall = true;
@@ -78,13 +83,17 @@ pkgs.testers.runNixOSTest {
         nixosModules."pubsubBuilder"
       ];
 
-      nix.settings.experimental-features = [
-        "nix-command"
-        "flakes"
-      ];
+      nix.settings = {
+        trusted-users = [ "pubsub-builder" ];
+        experimental-features = [
+          "nix-command"
+          "flakes"
+        ];
+      };
 
       system.extraDependencies = [ flake ];
 
+      systemd.services."pubsub-builder".environment."RUST_BACKTRACE" = "1";
       services.pubsub.builder = {
         enable = true;
         logLevel = "pubsub_=trace";

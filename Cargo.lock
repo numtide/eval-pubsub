@@ -405,6 +405,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 
 [[package]]
+name = "derive-where"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e2b94854e8576378ccda7c8de8a66ed8b4e8acbd2c50ec3418ea6c8aaf4b567"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "diesel"
 version = "2.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1406,9 +1417,11 @@ dependencies = [
 name = "pubsub-builder"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap",
  "env_logger",
  "log",
+ "pubsub-nar-copy",
  "pubsub-proto",
  "serde",
  "serde_json",
@@ -1430,6 +1443,7 @@ dependencies = [
  "futures",
  "log",
  "pubsub-client",
+ "pubsub-nar-copy",
  "serde",
  "serde_json",
  "tokio",
@@ -1440,6 +1454,7 @@ dependencies = [
 name = "pubsub-client"
 version = "0.1.0"
 dependencies = [
+ "derive-where",
  "futures",
  "log",
  "pubsub-nar-copy",
@@ -1461,15 +1476,18 @@ version = "0.1.0"
 name = "pubsub-nar-copy"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "base16",
  "base64 0.23.1",
  "bytes",
+ "deadpool",
  "futures",
  "itertools 0.15.0",
  "log",
  "nix-base32",
  "nom",
  "pubsub-proto",
+ "pubsub-util",
  "replace_with",
  "thiserror 1.0.69",
  "tokio",
@@ -1511,7 +1529,9 @@ dependencies = [
  "itertools 0.15.0",
  "log",
  "prost-types",
+ "pubsub-nar-copy",
  "pubsub-proto",
+ "pubsub-util",
  "serde",
  "serde_json",
  "sysinfo",
@@ -1524,6 +1544,15 @@ dependencies = [
  "tonic",
  "tower 0.4.13",
  "uuid",
+]
+
+[[package]]
+name = "pubsub-util"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "tokio",
 ]
 
 [[package]]

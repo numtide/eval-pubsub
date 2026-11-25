@@ -83,10 +83,10 @@ impl NixSerialize for UnkeyedValidPathInfo {
                 .expect("valid ultimate")
                 .serialize(protocol_version, bytes);
 
-            self.signatures
-                .as_ref()
-                .expect("valid signatures")
-                .serialize(protocol_version, bytes);
+            match &self.signatures {
+                Some(signatures) => signatures.serialize(protocol_version, bytes),
+                None => Vec::<Signature>::new().serialize(protocol_version, bytes),
+            }
             match &self.ca {
                 Some(ca) => ca.serialize(protocol_version, bytes),
                 None => "".serialize(protocol_version, bytes),

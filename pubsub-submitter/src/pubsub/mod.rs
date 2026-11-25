@@ -1,7 +1,4 @@
 #![allow(unstable_name_collisions)]
-use diesel::backend::Backend;
-use diesel::deserialize::{FromSql, Queryable, QueryableByName};
-use diesel::{IntoSql as _, sql_types};
 use diesel_async::pooled_connection::deadpool::Object;
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _};
 use pubsub_proto::pubsub as proto;
@@ -9,14 +6,11 @@ use pubsub_proto::pubsub::client::pub_sub_client_server::PubSubClient;
 use pubsub_proto::pubsub::server::pub_sub_server::PubSub;
 
 use itertools::Itertools;
+use pubsub_util::job_set::JobSet;
 use std::collections::HashMap;
-use std::ops::Deref;
-use std::panic;
 use std::sync::Arc;
 use std::time::SystemTime;
-use time::OffsetDateTime;
-use tokio::sync::{Notify, RwLock, SetOnce, mpsc};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -39,10 +33,14 @@ mod pending_job_notification;
 #[derive(Clone)]
 pub struct PubSubService {
     db_connector: DBConnector,
-    join_set: Arc<RwLock<JoinSet<()>>>,
+    job_set: JobSet,
 }
 
 impl PubSubService {
+    pub async fn wait_shutdown(self) {
+        self.job_set.wait_shutdown().await
+    }
+
     async fn check_registered(
         &self,
         conn: &mut Object<AsyncPgConnection>,
@@ -52,24 +50,6 @@ impl PubSubService {
             Some(_builder) => Ok(()),
             None => Err(SubmitterError::Unregistered {}),
         }
-    }
-
-    pub async fn spawn<S, F1, F2>(&self, name: S, future: F1, finally: F2) -> JoinHandle<F2::Output>
-    where
-        S: AsRef<str>,
-        F1: Future<Output = ()> + Send + 'static,
-        F2: Future<Output = ()> + Send + 'static,
-    {
-        let name = name.as_ref().to_owned();
-        log::trace!("spawning background task with name {}", name);
-        let join_set = self.join_set.clone();
-        tokio::spawn(async move {
-            join_set.write().await.spawn(async move {
-                future.await;
-                log::trace!("background task with name {} exiting", name);
-                finally.await
-            });
-        })
     }
 }
 
@@ -142,41 +122,45 @@ impl PubSub for PubSubService {
 
         {
             let tx = tx.clone();
-            self.spawn(
-                "list_jobs",
-                async move {
-                    db_connector::listen(
-                        &mut conn_notifs,
-                        async move |pending_job: PendingJobNotification| {
-                            match db_connector::get_job(&mut conn_listener, pending_job.job_uuid)
+            self.job_set
+                .spawn(
+                    "list_jobs",
+                    async move {
+                        db_connector::listen(
+                            &mut conn_notifs,
+                            async move |pending_job: PendingJobNotification| {
+                                match db_connector::get_job(
+                                    &mut conn_listener,
+                                    pending_job.job_uuid,
+                                )
                                 .await
-                            {
-                                Ok(Some(job)) => {
-                                    log::trace!(
-                                        "sending new {:?} to builder {}",
-                                        job,
-                                        builder_uuid
-                                    );
-                                    tx.send(Ok(proto::server::ListJobsResponse {
-                                        job: Some(job.into()),
-                                    }))
-                                    .await
-                                    .map_err(|_| SubmitterError::JobSend { builder_uuid })
-                                    .unwrap();
+                                {
+                                    Ok(Some(job)) => {
+                                        log::trace!(
+                                            "sending new {:?} to builder {}",
+                                            job,
+                                            builder_uuid
+                                        );
+                                        tx.send(Ok(proto::server::ListJobsResponse {
+                                            job: Some(job.into()),
+                                        }))
+                                        .await
+                                        .map_err(|_| SubmitterError::JobSend { builder_uuid })
+                                        .unwrap();
 
-                                    DoContinue::Continue
+                                        DoContinue::Continue
+                                    }
+                                    Ok(None) => todo!(),
+                                    Err(err) => DoContinue::Stop(Err(err)),
                                 }
-                                Ok(None) => todo!(),
-                                Err(err) => DoContinue::Stop(Err(err)),
-                            }
-                        },
-                    )
-                    .await
-                    .unwrap();
-                },
-                async move {},
-            )
-            .await
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    },
+                    async move {},
+                )
+                .await
         };
 
         let pending_jobs = db_connector::get_pending_jobs(&mut conn).await?;
@@ -419,87 +403,89 @@ impl PubSubClient for PubSubService {
         log::info!("client tailing job with UUID {}", job_uuid);
 
         if follow {
-            self.spawn(
-                "tail_job",
-                {
-                    let mut conn = self.db_connector.get().await?;
-                    let tx = tx.clone();
-                    let done_with_backfill = done_with_backfill.clone();
-                    let started_backfill = started_backfill.clone();
-                    async move {
-                        started_backfill.notify_one();
-                        db_connector::listen(
-                            &mut conn_notifs,
-                            async move |job_output_notification: JobOutputNotification| {
-                                done_with_backfill.notified().await;
-                                if job_output_notification.job_uuid == job_uuid {
-                                    match db_connector::get_job_output(
-                                        &mut conn,
-                                        job_output_notification.job_output_id,
-                                    )
-                                    .await
-                                    .unwrap()
-                                    {
-                                        Some(job_output) => {
-                                            log::trace!(
-                                                "sending job output {:?} for joib with UUID {}",
-                                                job_output,
-                                                job_uuid
-                                            );
-                                            let _ = tx
-                                                .send(Ok(proto::client::TailJobResponse {
-                                                    line: job_output.line,
-                                                }))
-                                                .await;
-                                        }
-                                        None => {
-                                            let _ = tx
-                                                .send(Err(SubmitterError::JobOutputNotFound {
-                                                    job_output_id: job_output_notification
-                                                        .job_output_id,
-                                                }
-                                                .into()))
-                                                .await;
+            self.job_set
+                .spawn(
+                    "tail_job",
+                    {
+                        let mut conn = self.db_connector.get().await?;
+                        let tx = tx.clone();
+                        let done_with_backfill = done_with_backfill.clone();
+                        let started_backfill = started_backfill.clone();
+                        async move {
+                            started_backfill.notify_one();
+                            db_connector::listen(
+                                &mut conn_notifs,
+                                async move |job_output_notification: JobOutputNotification| {
+                                    done_with_backfill.notified().await;
+                                    if job_output_notification.job_uuid == job_uuid {
+                                        match db_connector::get_job_output(
+                                            &mut conn,
+                                            job_output_notification.job_output_id,
+                                        )
+                                        .await
+                                        .unwrap()
+                                        {
+                                            Some(job_output) => {
+                                                log::trace!(
+                                                    "sending job output {:?} for joib with UUID {}",
+                                                    job_output,
+                                                    job_uuid
+                                                );
+                                                let _ = tx
+                                                    .send(Ok(proto::client::TailJobResponse {
+                                                        line: job_output.line,
+                                                    }))
+                                                    .await;
+                                            }
+                                            None => {
+                                                let _ = tx
+                                                    .send(Err(SubmitterError::JobOutputNotFound {
+                                                        job_output_id: job_output_notification
+                                                            .job_output_id,
+                                                    }
+                                                    .into()))
+                                                    .await;
+                                            }
                                         }
                                     }
-                                }
 
-                                DoContinue::Continue
-                            },
-                        )
-                        .await
-                        .unwrap()
+                                    DoContinue::Continue
+                                },
+                            )
+                            .await
+                            .unwrap()
+                        }
+                    },
+                    async move {},
+                )
+                .await;
+        }
+
+        self.job_set
+            .spawn(
+                "backfill_job",
+                async move {
+                    let mut counter = 0;
+                    let job_outputs =
+                        db_connector::get_job_outputs(&mut conn, job_uuid, end, number).await;
+                    if follow {
+                        started_backfill.notified().await;
                     }
+                    for job_output in job_outputs.unwrap() {
+                        if log::log_enabled!(log::Level::Debug) {
+                            counter += 1;
+                        }
+                        tx.send(Ok(proto::client::TailJobResponse {
+                            line: job_output.line,
+                        }))
+                        .await
+                        .unwrap();
+                    }
+                    log::debug!("backfilled {} job outputs for job {}", counter, job_uuid);
                 },
                 async move {},
             )
             .await;
-        }
-
-        self.spawn(
-            "backfill_job",
-            async move {
-                let mut counter = 0;
-                let job_outputs =
-                    db_connector::get_job_outputs(&mut conn, job_uuid, end, number).await;
-                if follow {
-                    started_backfill.notified().await;
-                }
-                for job_output in job_outputs.unwrap() {
-                    if log::log_enabled!(log::Level::Debug) {
-                        counter += 1;
-                    }
-                    tx.send(Ok(proto::client::TailJobResponse {
-                        line: job_output.line,
-                    }))
-                    .await
-                    .unwrap();
-                }
-                log::debug!("backfilled {} job outputs for job {}", counter, job_uuid);
-            },
-            async move {},
-        )
-        .await;
 
         done_with_backfill.notify_one();
 
@@ -526,7 +512,7 @@ impl PubSubClient for PubSubService {
         {
             let tx = tx.clone();
             let mut conn = conn_listener;
-            self.spawn(
+            self.job_set.spawn(
                 "wait_job",
                 async move {
                     db_connector::listen(
@@ -664,35 +650,7 @@ impl PubSubClient for PubSubService {
     }
 }
 
-struct DatabaseName {
-    name: String,
-}
-
-impl<DB> Queryable<sql_types::Text, DB> for DatabaseName
-where
-    DB: Backend,
-    String: FromSql<sql_types::Text, DB>,
-{
-    type Row = String;
-
-    fn build(name: Self::Row) -> diesel::deserialize::Result<Self> {
-        Ok(Self { name })
-    }
-}
-
 impl PubSubService {
-    pub async fn wait_shutdown(self) {
-        let mut join_set = self.join_set.write().await;
-        join_set.abort_all();
-        while let Some(res) = join_set.join_next().await {
-            match res {
-                Ok(_) => {}
-                Err(err) if err.is_cancelled() => {}
-                Err(err) => panic::resume_unwind(err.into_panic()),
-            };
-        }
-    }
-
     pub async fn new<S>(
         database_url: S,
     ) -> Result<PubSubService, Box<dyn std::error::Error + Send + Sync>>
@@ -701,10 +659,11 @@ impl PubSubService {
     {
         let (db_connector, connection) = DBConnector::new(database_url.as_ref().to_owned()).await?;
         let pub_sub_service = PubSubService {
-            join_set: Arc::new(RwLock::new(JoinSet::new())),
+            job_set: JobSet::new(),
             db_connector,
         };
         pub_sub_service
+            .job_set
             .spawn(
                 "pg_client connection",
                 async move {

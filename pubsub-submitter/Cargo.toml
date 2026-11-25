@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 pubsub-proto = { path = "../pubsub-proto" }
+pubsub-util = { path = "../pubsub-util" }
+pubsub-nar-copy = { path = "../pubsub-nar-copy" }
 tokio = "*"
 tokio-stream = "*"
 tonic = "*"

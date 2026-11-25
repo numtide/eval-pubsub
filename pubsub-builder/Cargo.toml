@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 pubsub-proto = { path = "../pubsub-proto" }
+bytes = "1.12"
+pubsub-nar-copy = { path = "../pubsub-nar-copy" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "fs", "io-util"] }
 tokio-stream = "*"
 tonic = "*"

@@ -83,7 +83,8 @@ fn serialize_slice_u8(
     };
     bytes.reserve(size_of::<u64>() + size + padding as usize);
 
-    bytes.put_u64_le(value.len() as u64);
+    log::debug!("sending {size} bytes with {padding} bytes padding");
+    bytes.put_u64_le(size as u64);
     bytes.put_slice(value);
     for _ in 0..padding {
         assert!(padding != 0);

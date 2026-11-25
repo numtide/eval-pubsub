@@ -9,6 +9,14 @@ pub enum OptStorePath {
     Nothing,
 }
 
+impl TryFrom<String> for OptStorePath {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        TryFrom::try_from(value.as_str())
+    }
+}
+
 impl TryFrom<&str> for OptStorePath {
     type Error = String;
 

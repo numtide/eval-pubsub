@@ -1,16 +1,26 @@
 pub mod error;
 
 use std::{
+    collections::HashSet,
     io::ErrorKind::StaleNetworkFileHandle,
     process::{Command, Stdio},
+    sync::Arc,
 };
 
+use derive_where::derive_where;
 use futures::{Stream, StreamExt as _};
+use pubsub_nar_copy::{nix_client::NixClient, wire};
 use pubsub_proto::pubsub::{
     client::{self as client, pub_sub_client_client::PubSubClientClient},
     common,
+    nar_copy::nar_copy_client::NarCopyClient,
 };
 use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::UnixStream,
+    sync::RwLock,
+};
 use tokio_util::io::SyncIoBridge;
 use tonic::{Request, Status, transport::Channel};
 use uuid::Uuid;
@@ -19,9 +29,14 @@ use crate::error::GrpcError;
 
 type Error = error::Error;
 
-#[derive(Clone)]
-pub struct Client<C> {
-    tonic_client: PubSubClientClient<C>,
+#[derive_where(Clone)]
+pub struct Client<C, RW>
+where
+    C: Clone,
+{
+    tonic_client_client: PubSubClientClient<C>,
+    nar_copy_client: pubsub_nar_copy::Client<C>,
+    nix_client: Arc<RwLock<NixClient<RW>>>,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq, Debug)]
@@ -108,7 +123,13 @@ pub enum EvalJob {
 }
 
 impl EvalJob {
-    fn resolve(self) -> common::EvalJob {
+    async fn resolve<RW>(
+        self,
+        nix_client: &mut NixClient<RW>,
+    ) -> Result<(common::EvalJob, HashSet<wire::StorePath>), Error>
+    where
+        RW: AsyncRead + AsyncWrite + Unpin + Send,
+    {
         match self {
             Self::Flake { flake_ref, attrs } => {
                 let mut child = Command::new("nix")
@@ -130,16 +151,23 @@ impl EvalJob {
 
                 let mut value: serde_json::Value = serde_json::from_reader(stdout).unwrap();
                 let store_path: serde_json::Value = value["path"].take();
-                let store_path = serde_json::from_value(store_path).unwrap();
+                let store_path: String = serde_json::from_value(store_path).unwrap();
 
                 log::info!("resolved {} to {}", flake_ref, store_path);
 
-                common::EvalJob {
+                let eval_job = common::EvalJob {
                     r#type: Some(common::eval_job::Type::Flake(common::eval_job::Flake {
-                        store_path,
+                        store_path: store_path.clone(),
                         attrs,
                     })),
-                }
+                };
+
+                let closure = nix_client
+                    .get_closure(&store_path.try_into().unwrap())
+                    .await?
+                    .ok_or(Error::FailedToFetchClosure(flake_ref))?;
+
+                Ok((eval_job, closure))
             }
         }
     }
@@ -191,14 +219,32 @@ pub enum AnonymousJob {
 }
 
 impl AnonymousJob {
-    fn resolve(self) -> common::AnonymousJob {
+    async fn resolve<RW>(
+        self,
+        nix_client: &mut NixClient<RW>,
+    ) -> Result<(common::AnonymousJob, HashSet<wire::StorePath>), Error>
+    where
+        RW: AsyncRead + AsyncWrite + Unpin + Send,
+    {
         match self {
-            AnonymousJob::EvalJob(eval_job) => common::AnonymousJob {
-                r#type: Some(common::anonymous_job::Type::Eval(eval_job.resolve())),
-            },
-            AnonymousJob::BuildJob(build_job) => common::AnonymousJob {
-                r#type: Some(common::anonymous_job::Type::Build(build_job.into())),
-            },
+            AnonymousJob::EvalJob(eval_job) => {
+                let (eval_job, closure) = eval_job.resolve(nix_client).await?;
+                Ok((
+                    common::AnonymousJob {
+                        r#type: Some(common::anonymous_job::Type::Eval(eval_job)),
+                    },
+                    closure,
+                ))
+            }
+            AnonymousJob::BuildJob(build_job) => {
+                let closure = todo!();
+                Ok((
+                    common::AnonymousJob {
+                        r#type: Some(common::anonymous_job::Type::Build(build_job.into())),
+                    },
+                    closure,
+                ))
+            }
         }
     }
 }
@@ -309,28 +355,60 @@ impl TryFrom<common::JobWithStatus> for JobWithStatus {
     }
 }
 
-impl Client<Channel> {
+impl Client<Channel, UnixStream> {
     pub async fn new<S>(address: S) -> Result<Self, Error>
     where
         S: AsRef<str>,
     {
-        PubSubClientClient::connect(address.as_ref().to_owned())
+        let unix_stream = NixClient::connect_unix_default().await.unwrap();
+        let nix_client = NixClient::handshake(unix_stream).await.unwrap();
+
+        let tonic_client_client = PubSubClientClient::connect(address.as_ref().to_owned())
             .await
-            .map(|tonic_client| Client { tonic_client })
-            .map_err(Into::<GrpcError>::into)
-            .map_err(Into::into)
+            .map_err(Into::<GrpcError>::into)?;
+
+        let nar_copy_client = pubsub_nar_copy::Client::new(address).await.unwrap();
+
+        Ok(Client {
+            tonic_client_client,
+            nar_copy_client,
+            nix_client: Arc::new(RwLock::new(nix_client)),
+        })
     }
+
     pub async fn submit_job(&mut self, anonymous_job: AnonymousJob) -> Result<Uuid, Error> {
+        let mut nix_client = self.nix_client.write().await;
+        let (eval_job, closure) = anonymous_job.resolve(&mut nix_client).await?;
+
+        for store_path in closure {
+            log::debug!("querying nar_info for {:?}", store_path);
+            let nar_info = nix_client
+                .query_path_info(&store_path)
+                .await
+                .unwrap()
+                .unwrap();
+            log::debug!("getting nar for {:?}", store_path);
+            let nar = nix_client.nar_from_path(&store_path).await.unwrap();
+
+            log::debug!("got nar_info {:?}", nar_info);
+
+            self.nar_copy_client
+                .upload_nar(wire::ValidPathInfo::new(store_path, nar_info), nar)
+                .await
+                .unwrap()
+        }
+
         let response = self
-            .tonic_client
+            .tonic_client_client
             .submit_job(Request::new(client::SubmitJobRequest {
-                job: Some(anonymous_job.resolve()),
+                job: Some(eval_job),
             }))
             .await
             .map_err(Into::<GrpcError>::into)?;
 
         Ok(response.into_inner().job_id.unwrap().into())
     }
+
     pub async fn tail_job(
         &mut self,
         job_uuid: Uuid,
@@ -339,7 +417,7 @@ impl Client<Channel> {
         number: i64,
     ) -> Result<impl Stream<Item = Result<String, Status>> + use<>, Error> {
         let stream = self
-            .tonic_client
+            .tonic_client_client
             .tail_job(Request::new(client::TailJobRequest {
                 job_id: Some(job_uuid.into()),
                 follow,
@@ -352,9 +430,10 @@ impl Client<Channel> {
             .map(|response| response.map(|response| response.line));
         Ok(stream)
     }
+
     pub async fn wait_job(&mut self, job_uuid: Uuid) -> Result<JobStatus, Error> {
         let mut stream = self
-            .tonic_client
+            .tonic_client_client
             .wait_job(Request::new(client::WaitJobRequest {
                 job_id: Some(job_uuid.into()),
             }))
@@ -371,6 +450,7 @@ impl Client<Channel> {
             None => todo!(),
         }
     }
+
     pub async fn list_jobs(
         &mut self,
         page: i32,
@@ -378,7 +458,7 @@ impl Client<Channel> {
         filter: Option<JobFilter>,
     ) -> Result<(Vec<JobWithStatus>, i32), Error> {
         let response = self
-            .tonic_client
+            .tonic_client_client
             .list_jobs(Request::new(client::ListJobsRequest {
                 page,
                 count,
@@ -394,13 +474,14 @@ impl Client<Channel> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok((jobs, response.total))
     }
+
     pub async fn list_builders(
         &mut self,
         page: i32,
         count: i32,
     ) -> Result<(Vec<Builder>, i32), Error> {
         let response = self
-            .tonic_client
+            .tonic_client_client
             .list_builders(Request::new(client::ListBuildersRequest { page, count }))
             .await
             .map_err(Into::<GrpcError>::into)?

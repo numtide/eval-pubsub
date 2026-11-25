@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use bytes::Bytes;
 use pubsub_proto::pubsub::{
     self as proto, common::JobOutput, server::pub_sub_client::PubSubClient,
 };
@@ -45,7 +46,10 @@ pub struct Offer {
 }
 
 impl Submitter {
-    pub fn connect_lazy(uri: String, builder_uuid: Uuid) -> Result<Self, BuilderError> {
+    pub fn connect_lazy<S>(uri: S, builder_uuid: Uuid) -> Result<Self, BuilderError>
+    where
+        S: Into<String> + Into<Bytes> + Clone,
+    {
         let channel = Endpoint::from_shared(uri.clone())?.connect_lazy();
         let interceptor = BuilderUuidInterceptor {
             builder_uuid: builder_uuid
@@ -55,7 +59,7 @@ impl Submitter {
         };
 
         Ok(Self {
-            uri,
+            uri: uri.into(),
             client: PubSubClient::with_interceptor(channel, interceptor),
         })
     }

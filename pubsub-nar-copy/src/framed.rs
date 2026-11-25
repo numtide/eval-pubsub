@@ -3,6 +3,14 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::wire::{NixDeserialize, NixSerialize, ProtocolVersion};
 
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("encountered an IO error {0:?}")]
+    Io(#[from] std::io::Error),
+    #[error("encountered a unrecoverable Nom failure")]
+    NomFailure,
+}
+
 pub struct FramedNixWriter<W> {
     write_buffer: BytesMut,
     writer: W,
@@ -23,22 +31,23 @@ impl<W> FramedNixWriter<W>
 where
     W: AsyncWrite + Unpin,
 {
-    pub async fn write<A>(&mut self, protocol_version: ProtocolVersion, value: &A) -> Result<(), ()>
+    pub async fn write<A>(
+        &mut self,
+        protocol_version: ProtocolVersion,
+        value: &A,
+    ) -> Result<(), Error>
     where
         A: NixSerialize,
     {
         value.serialize(protocol_version, &mut self.write_buffer);
-        self.writer
-            .write_all_buf(&mut self.write_buffer)
-            .await
-            .unwrap();
+        self.writer.write_all_buf(&mut self.write_buffer).await?;
         self.write_buffer.truncate(0);
 
         Ok(())
     }
 
-    pub async fn flush(&mut self) -> Result<(), ()> {
-        Ok(self.writer.flush().await.unwrap())
+    pub async fn flush(&mut self) -> Result<(), Error> {
+        Ok(self.writer.flush().await?)
     }
 }
 
@@ -70,24 +79,23 @@ where
         self.read_buffer.get_u64_le()
     }
 
-    pub async fn nom_read<A>(&mut self, protocol_version: ProtocolVersion) -> Result<A, ()>
+    pub async fn nom_read<A>(&mut self, protocol_version: ProtocolVersion) -> Result<A, Error>
     where
-        A: for<'a> NixDeserialize<'a>,
+        A: for<'a> NixDeserialize<'a> + Sized,
     {
         loop {
             match A::deserialize(protocol_version, &self.read_buffer) {
                 Ok((input, ok)) => {
-                    let _ = self
-                        .read_buffer
-                        .split_to(self.read_buffer.len() - input.len());
+                    let length = input.len();
+                    let _ = self.read_buffer.split_to(self.read_buffer.len() - length);
                     break Ok(ok);
                 }
-                Err(nom::Err::Incomplete(_)) => {}
-                Err(nom::Err::Error(error)) => panic!("error: {:?}", error),
-                Err(nom::Err::Failure(failure)) => panic!("failure: {:?}", failure),
+                Err(nom::Err::Incomplete(_)) => {
+                    let _ = self.reader.read_buf(&mut self.read_buffer).await?;
+                }
+                Err(nom::Err::Error(_error)) => break Err(Error::NomFailure),
+                Err(nom::Err::Failure(_failure)) => break Err(Error::NomFailure),
             }
-
-            self.reader.read_buf(&mut self.read_buffer).await.unwrap();
         }
     }
 }

@@ -1,14 +1,16 @@
 use std::{collections::HashMap, path::Path, process::Stdio};
 
+use pubsub_nar_copy::{nix_client::NixClient, wire};
 use pubsub_proto::pubsub as proto;
 use serde::Deserialize;
 use time::UtcDateTime;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncRead, BufReader},
+    net::UnixStream,
     process::Command,
 };
 
-use super::Conclusion;
+use super::{Conclusion, Executor};
 use crate::output::OutputSink;
 
 #[derive(Debug, Deserialize)]
@@ -74,21 +76,51 @@ impl TryFrom<NixEvalJobsLineWeak> for NixEvalJobsLine {
     }
 }
 
+async fn fetch_inputs_for_eval_job(executor: &mut Executor, eval_job: &proto::common::EvalJob) {
+    match eval_job.r#type.as_ref().unwrap() {
+        proto::common::eval_job::Type::Flake(flake) => {
+            let store_path = wire::StorePath::try_from(flake.store_path.clone()).unwrap();
+
+            let mut nar = None;
+            for nar_copy_client in &mut executor.nar_copy_clients {
+                nar = nar_copy_client.download_nar(store_path.hash).await.unwrap();
+                if nar.is_some() {
+                    break;
+                }
+            }
+
+            match nar {
+                Some((nar_info, nar)) => executor
+                    .nix_client_pool
+                    .get()
+                    .await
+                    .unwrap()
+                    .add_to_store_nar(&nar_info, false, false, &nar)
+                    .await
+                    .unwrap(),
+                None => {}
+            }
+        }
+    }
+}
+
 pub async fn run(
-    nix_eval_jobs: &Path,
+    executor: &mut Executor,
     eval_job: proto::common::EvalJob,
     output: &OutputSink,
 ) -> Conclusion {
+    fetch_inputs_for_eval_job(executor, &eval_job).await;
+
     match eval_job.r#type {
         Some(proto::common::eval_job::Type::Flake(flake)) => {
-            run_flake(nix_eval_jobs, flake, output).await
+            run_flake(executor, flake, output).await
         }
         None => Conclusion::Failure("eval job has no type".to_owned()),
     }
 }
 
 async fn run_flake(
-    nix_eval_jobs: &Path,
+    executor: &mut Executor,
     flake: proto::common::eval_job::Flake,
     output: &OutputSink,
 ) -> Conclusion {
@@ -99,7 +131,7 @@ async fn run_flake(
     let mut attrs = Vec::new();
     for attr in flake.attrs {
         let installable = format!("path:{}#{}", flake.store_path, attr);
-        match evaluate(nix_eval_jobs, &installable, &[attr], output).await {
+        match evaluate(executor, &installable, &[attr], output).await {
             Ok(results) => attrs.extend(results),
             Err(reason) => return Conclusion::Failure(reason),
         }
@@ -111,12 +143,12 @@ async fn run_flake(
 }
 
 async fn evaluate(
-    nix_eval_jobs: &Path,
+    executor: &mut Executor,
     installable: &str,
     prefix: &[String],
     output: &OutputSink,
 ) -> Result<Vec<proto::common::eval_result::Attr>, String> {
-    let mut child = Command::new(nix_eval_jobs)
+    let mut child = Command::new(&executor.nix_eval_jobs)
         .arg("--flake")
         .arg(installable)
         .stdin(Stdio::null())
@@ -124,7 +156,13 @@ async fn evaluate(
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|err| format!("failed to start {}: {}", nix_eval_jobs.display(), err))?;
+        .map_err(|err| {
+            format!(
+                "failed to start {}: {}",
+                executor.nix_eval_jobs.display(),
+                err
+            )
+        })?;
 
     let stdout = child.stdout.take().expect("stdout is piped");
 

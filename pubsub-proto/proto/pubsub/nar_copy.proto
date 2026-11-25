@@ -22,6 +22,7 @@ message NarInfo {
   repeated string reference = 4;
   // optional
   optional string deriver = 5;
+  // optional
   repeated string signature = 6;
   optional string ca = 7;
 }

@@ -5,8 +5,10 @@ edition = "2024"
 
 [dependencies]
 pubsub-proto = { path = "../pubsub-proto" }
+pubsub-util = { path = "../pubsub-util" }
 tokio = "*"
 tokio-stream = "*"
+async-stream = "*"
 tonic = "*"
 thiserror = "1.0"
 itertools = { version = "0.15" }
@@ -18,3 +20,4 @@ nix-base32 = "0.2"
 base16 = "0.2"
 base64 = "0.23"
 replace_with = "0.1"
+deadpool = "0.13"

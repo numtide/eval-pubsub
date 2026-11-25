@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 pubsub-client = { path = "../pubsub-client" }
+pubsub-nar-copy = { path = "../pubsub-nar-copy" }
 tokio = "*"
 log = "0.4"
 env_logger = "0.11"

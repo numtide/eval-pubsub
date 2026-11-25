@@ -3,22 +3,25 @@ import shutil
 
 endpoint = "http://localhost:10000"
 
+def pubsub_cli(arguments = []):
+    return submitter.succeed(f"env RUST_LOG=pubsub_=trace {__pubsub_cli} " + " ".join(arguments))
+
 def list_jobs(page, count, filter=None):
-    jobs = submitter.succeed(
-        f'{__pubsub_cli} --endpoint http://localhost:10000 list-jobs {page} {count}'
-        + f' --filter {filter}' if filter is not None else ""
-    ).strip()
+    jobs = pubsub_cli([
+        '--endpoint', 'http://localhost:10000', 'list-jobs', str(page), str(count),
+        *(['--filter', filter] if filter is not None else [])
+    ]).strip()
     return list(map(json.loads, jobs.splitlines()))
 
 start_all()
 
 submitter.wait_for_unit("pubsub-submitter.service")
-submitter.wait_for_open_port(10000)
 builder.stop_job("pubsub-builder.service")
+submitter.wait_for_open_port(10000)
 
 try:
     with subtest("client submits an eval job"):
-        job_uuid_pre = submitter.succeed(f'{__pubsub_cli} --endpoint http://localhost:10000 submit-jobs "@{__submit_job}"').strip()
+        job_uuid_pre = pubsub_cli(['--endpoint', 'http://localhost:10000', 'submit-jobs', f'@{__submit_job}']).strip()
 
     with subtest("pending filter works"):
         jobs = list_jobs(0, 100, "pending")
@@ -41,7 +44,7 @@ try:
     builder_uuid = builder.wait_until_succeeds("cat /var/lib/pubsub-builder/uuid", timeout=10).strip()
 
     with subtest("builder registers and subscribes"):
-        builders = submitter.succeed(f'{__pubsub_cli} --endpoint http://localhost:10000 list-builders 0 100')
+        builders = pubsub_cli(['--endpoint', 'http://localhost:10000', 'list-builders', '0', '100'])
         builders = list(map(json.loads, builders.splitlines()[1:]))
 
         print("registered builders:")
@@ -54,10 +57,10 @@ try:
         assert builders[0]["active"], "builder isn't active"
 
     with subtest("client submits an eval job"):
-        job_uuid_post = submitter.succeed(f'{__pubsub_cli} --endpoint http://localhost:10000 submit-jobs "@{__submit_job}"').strip()
+        job_uuid_post = pubsub_cli(['--endpoint', 'http://localhost:10000', 'submit-jobs', f'@{__submit_job}']).strip()
 
     with subtest("builder evaluates and concludes the job"):
-        submitter.succeed(f'{__pubsub_cli} --endpoint http://localhost:10000 wait-jobs {job_uuid_post} {job_uuid_pre}')
+        pubsub_cli(['--endpoint', 'http://localhost:10000', 'wait-jobs', job_uuid_post, job_uuid_pre])
         jobs = list_jobs(0, 100)
         print(jobs)
         for job in jobs:
@@ -66,7 +69,7 @@ try:
             assert job["status"]["Succeeded"]["builder_uuid"] == builder_uuid
 
     with subtest("job output carries evaluation results and errors"):
-        output = submitter.succeed(f"{__pubsub_cli} --endpoint http://localhost:10000 tail-jobs --end {job_uuid_pre}")
+        output = pubsub_cli(['--endpoint', 'http://localhost:10000', 'tail-jobs', '--end', job_uuid_pre])
         print(output)
         output = list(map(lambda str: str.strip(), output.splitlines()))
         assert len(output) == 11
@@ -74,7 +77,7 @@ try:
         assert "failed to evaluate evalJobs.broken:" in output
         assert "error: boom" in output
 
-        output = submitter.succeed(f"{__pubsub_cli} --endpoint http://localhost:10000 tail-jobs --end {job_uuid_post}")
+        output = pubsub_cli(['--endpoint', 'http://localhost:10000', 'tail-jobs', '--end', job_uuid_post])
         print(output)
         output = list(map(lambda str: str.strip(), output.splitlines()))
         assert len(output) == 11

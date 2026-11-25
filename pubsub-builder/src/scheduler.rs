@@ -25,9 +25,9 @@ pub async fn run(executor: Executor, max_jobs: usize, mut offers: mpsc::Receiver
             .expect("the semaphore is never closed");
 
         if pick(&offer).await {
-            let executor = executor.clone();
+            let mut executor = executor.clone();
             tokio::spawn(async move {
-                run_job(&executor, offer).await;
+                run_job(&mut executor, offer).await;
                 drop(slot);
             });
         }
@@ -55,7 +55,7 @@ async fn pick(offer: &Offer) -> bool {
     }
 }
 
-async fn run_job(executor: &Executor, offer: Offer) {
+async fn run_job(executor: &mut Executor, offer: Offer) {
     let output = OutputSink::new(offer.submitter.clone(), offer.job_id);
     let conclusion = executor.run(offer.job, &output).await;
 

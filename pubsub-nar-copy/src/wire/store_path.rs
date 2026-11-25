@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::{Display, Write};
 
 use bytes::{BufMut as _, BytesMut};
 use nix_base32::{from_nix_base32, to_nix_base32};
@@ -8,7 +8,7 @@ use crate::wire::{
     self, NixDeserialize, NixSerialize, ProtocolVersion, StorePathHash, protocol_version,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct StorePath {
     pub store_dir: Option<String>,
     pub hash: StorePathHash,
@@ -43,6 +43,14 @@ impl TryFrom<&str> for StorePath {
     }
 }
 
+impl TryFrom<String> for StorePath {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.as_str().try_into()
+    }
+}
+
 impl From<&StorePath> for String {
     fn from(value: &StorePath) -> Self {
         let encoded_hash: String = (&value.hash).into();
@@ -52,6 +60,12 @@ impl From<&StorePath> for String {
         } else {
             format!("{}-{}", encoded_hash, value.name)
         }
+    }
+}
+
+impl std::fmt::Debug for StorePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_string().as_str())
     }
 }
 

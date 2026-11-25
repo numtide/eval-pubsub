@@ -20,6 +20,8 @@ rustPlatform.buildRustPackage {
       ../pubsub-common
       ../pubsub-proto
       ../pubsub-submitter
+      ../pubsub-nar-copy
+      ../pubsub-util
     ];
   };
 

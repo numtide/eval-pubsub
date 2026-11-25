@@ -15,6 +15,7 @@ use pubsub_proto::pubsub::{
     },
     server::{pub_sub_client::PubSubClient, pub_sub_server::PubSubServer},
 };
+use pubsub_util::init_logger;
 use tempfile::NamedTempFile;
 use tokio::{
     net::{UnixListener, UnixStream},
@@ -276,17 +277,6 @@ impl StubGrpc for ClientGrpcStub {
     }
 
     async fn wait_shutdown(&self, service: Self::Service) -> () {}
-}
-
-fn init_logger() {
-    let _ = env_logger::builder()
-        // Include all events in tests
-        .filter_level(log::LevelFilter::Info)
-        .filter_module("pubsub_submitter", log::LevelFilter::max())
-        // Ensure events are captured by `cargo test`
-        .is_test(true)
-        // Ignore errors initializing the logger if tests race to configure it
-        .try_init();
 }
 
 const JOB_1: LazyLock<models::AnonymousJob> = LazyLock::new(|| {
