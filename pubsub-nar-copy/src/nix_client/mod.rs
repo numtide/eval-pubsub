@@ -115,7 +115,7 @@ where
 
         let trust = nix_socket_r
             .get_u64_le()
-            .await
+            .await?
             .try_into()
             .map_err(Error::Other)?;
 
@@ -152,7 +152,7 @@ where
     }
 
     async fn read_log(&mut self) -> Result<bool, Error> {
-        let r#type = self.nix_socket_r.get_u64_le().await;
+        let r#type = self.nix_socket_r.get_u64_le().await?;
 
         match r#type {
             STDERR_LAST => Ok(false),
@@ -201,7 +201,7 @@ where
 
         self.flush().await?;
 
-        let success = self.nix_socket_r.get_u64_le().await;
+        let success = self.nix_socket_r.get_u64_le().await?;
         let success: bool = success > 0;
 
         if success {

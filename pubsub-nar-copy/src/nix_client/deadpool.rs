@@ -26,7 +26,7 @@ impl managed::Manager for Manager {
     type Error = Error;
 
     async fn create(&self) -> Result<NixClient<UnixStream>, Error> {
-        let socket = UnixStream::connect(&self.socket_path).await.unwrap();
+        let socket = UnixStream::connect(&self.socket_path).await?;
         let nix_client = NixClient::handshake(socket).await?;
         Ok(nix_client)
     }

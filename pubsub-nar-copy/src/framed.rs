@@ -71,12 +71,12 @@ impl<R> FramedNixReader<R>
 where
     R: AsyncRead + Unpin,
 {
-    pub async fn get_u64_le(&mut self) -> u64 {
+    pub async fn get_u64_le(&mut self) -> Result<u64, Error> {
         while self.read_buffer.len() < size_of::<u64>() {
-            self.reader.read_buf(&mut self.read_buffer).await.unwrap();
+            self.reader.read_buf(&mut self.read_buffer).await?;
         }
 
-        self.read_buffer.get_u64_le()
+        Ok(self.read_buffer.get_u64_le())
     }
 
     pub async fn nom_read<A>(&mut self, protocol_version: ProtocolVersion) -> Result<A, Error>
