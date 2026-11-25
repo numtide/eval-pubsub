@@ -44,10 +44,10 @@ impl TryFrom<nar_copy::NarInfo> for wire::ValidPathInfo {
 
     fn try_from(value: nar_copy::NarInfo) -> Result<Self, Self::Error> {
         Ok(Self {
-            path: value.store_path.try_into()?,
+            path: value.store_path.try_into().map_err(|e| format!("{}", e))?,
             info: wire::UnkeyedValidPathInfo {
                 deriver: match value.deriver {
-                    Some(deriver) => deriver.try_into()?,
+                    Some(deriver) => deriver.try_into().map_err(|e| format!("{}", e))?,
                     None => wire::OptStorePath::Nothing,
                 },
                 nar_hash: value.nar_hash.try_into()?,
@@ -55,7 +55,8 @@ impl TryFrom<nar_copy::NarInfo> for wire::ValidPathInfo {
                     .reference
                     .into_iter()
                     .map(TryInto::try_into)
-                    .collect::<Result<_, _>>()?,
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| format!("{}", e))?,
                 registration_time: 0.into(),
                 nar_size: value.nar_size,
                 ultimate: Some(false),
