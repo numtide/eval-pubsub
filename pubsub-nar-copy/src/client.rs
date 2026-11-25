@@ -20,6 +20,8 @@ pub enum Error {
     ChunkMissing { offset: u64 },
     #[error("chunk missing at offset {offset}")]
     ChunkOutOfOrder { offset: u64 },
+    #[error("during value conversion {0:}")]
+    TryFrom(String),
 }
 
 #[derive(Clone, Debug)]
@@ -67,7 +69,7 @@ impl Client<Channel> {
             .into_option()?;
 
         match response.and_then(|response| response.into_inner().nar_info) {
-            Some(nar_info) => Ok(Some(nar_info.try_into().unwrap())),
+            Some(nar_info) => Ok(Some(nar_info.try_into().map_err(Error::TryFrom)?)),
             None => Ok(None),
         }
     }
