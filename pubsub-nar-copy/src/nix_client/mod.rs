@@ -38,6 +38,10 @@ pub enum Error {
     Framed(#[from] framed::Error),
     #[error("daemon error {0:?}")]
     Daemon(wire::NixError),
+    #[error("unsupported deprecated Read or Write log from the Nix daemon")]
+    LogReadWrite(),
+    #[error("unknown log type with ID {0}")]
+    UnknownLog(u64),
 }
 
 pub struct NixClient<RW> {
@@ -140,6 +144,13 @@ where
         Ok(())
     }
 
+    async fn flush(&mut self) -> Result<(), Error> {
+        self.nix_socket_w.flush().await?;
+        self.flush_logs().await?;
+
+        Ok(())
+    }
+
     async fn read_log(&mut self) -> Result<bool, Error> {
         let r#type = self.nix_socket_r.get_u64_le().await;
 
@@ -154,27 +165,18 @@ where
                 println!("log: {}", msg);
                 Ok(true)
             }
-            STDERR_READ => {
-                todo!();
-                Ok(true)
-            }
-            STDERR_WRITE => {
-                todo!();
-                Ok(true)
-            }
+            STDERR_READ => Err(Error::LogReadWrite()),
+            STDERR_WRITE => Err(Error::LogReadWrite()),
             STDERR_START_ACTIVITY => {
-                todo!();
-                Ok(true)
+                todo!("STDERR_START_ACTIVITY isn't supported yet");
             }
             STDERR_STOP_ACTIVITY => {
-                todo!();
-                Ok(true)
+                todo!("STDERR_STOP_ACTIVITY isn't supported yet");
             }
             STDERR_RESULT => {
-                todo!();
-                Ok(true)
+                todo!("STDERR_RESULT isn't supported yet");
             }
-            _ => Ok(false),
+            _ => Err(Error::UnknownLog(r#type)),
         }
     }
 
@@ -197,9 +199,7 @@ where
             .write(self.protocol_version, store_path)
             .await?;
 
-        self.nix_socket_w.flush().await?;
-
-        self.flush_logs().await?;
+        self.flush().await?;
 
         let success = self.nix_socket_r.get_u64_le().await;
         let success: bool = success > 0;
@@ -220,9 +220,7 @@ where
             .write(self.protocol_version, store_path)
             .await?;
 
-        self.nix_socket_w.flush().await?;
-
-        self.flush_logs().await?;
+        self.flush().await?;
 
         let decoder: Nar = self.nix_socket_r.nom_read(self.protocol_version).await?;
         Ok(decoder)
@@ -241,35 +239,28 @@ where
 
         self.write_operation(&Operation::AddToStoreNar).await?;
 
-        log::debug!("sending nar_info {info:?}");
         self.nix_socket_w.write(self.protocol_version, info).await?;
 
-        log::debug!("sending repair {repair}");
         self.nix_socket_w
             .write(self.protocol_version, &repair)
             .await?;
 
-        log::debug!("sending repair {dont_check_sigs}");
         self.nix_socket_w
             .write(self.protocol_version, &dont_check_sigs)
             .await?;
 
         let bytes = nar.bytes.as_slice();
 
-        log::debug!("sending nar contents");
         for chunk in bytes.chunks(512) {
             self.nix_socket_w
                 .write(self.protocol_version, &wire::bytes::Unpadded(chunk))
                 .await?;
         }
-        log::debug!("sending end of stream marker");
         self.nix_socket_w
             .write(self.protocol_version, &0u64)
             .await?;
 
-        self.nix_socket_w.flush().await?;
-
-        self.flush_logs().await?;
+        self.flush().await?;
 
         Ok(())
     }
@@ -285,9 +276,7 @@ where
             .write(self.protocol_version, &hash)
             .await?;
 
-        self.nix_socket_w.flush().await?;
-
-        self.flush_logs().await?;
+        self.flush().await?;
 
         let opt_store_path: wire::OptStorePath =
             self.nix_socket_r.nom_read(self.protocol_version).await?;
