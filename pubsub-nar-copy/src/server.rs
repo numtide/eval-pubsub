@@ -10,7 +10,7 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
-    nix_client::NixClient,
+    nix_client::{self, NixClient},
     wire::{self, ValidPathInfo},
 };
 
@@ -40,23 +40,22 @@ impl From<wire::ValidPathInfo> for nar_copy::NarInfo {
 }
 
 impl TryFrom<nar_copy::NarInfo> for wire::ValidPathInfo {
-    type Error = ();
+    type Error = String;
 
     fn try_from(value: nar_copy::NarInfo) -> Result<Self, Self::Error> {
         Ok(Self {
-            path: value.store_path.try_into().unwrap(),
+            path: value.store_path.try_into()?,
             info: wire::UnkeyedValidPathInfo {
                 deriver: match value.deriver {
-                    Some(deriver) => deriver.try_into().unwrap(),
+                    Some(deriver) => deriver.try_into()?,
                     None => wire::OptStorePath::Nothing,
                 },
-                nar_hash: value.nar_hash.try_into().unwrap(),
+                nar_hash: value.nar_hash.try_into()?,
                 references: value
                     .reference
                     .into_iter()
                     .map(TryInto::try_into)
-                    .collect::<Result<_, _>>()
-                    .unwrap(),
+                    .collect::<Result<_, _>>()?,
                 registration_time: 0.into(),
                 nar_size: value.nar_size,
                 ultimate: Some(false),
@@ -68,13 +67,37 @@ impl TryFrom<nar_copy::NarInfo> for wire::ValidPathInfo {
                             .signature
                             .into_iter()
                             .map(TryInto::try_into)
-                            .collect::<Result<_, _>>()
-                            .unwrap(),
+                            .collect::<Result<_, _>>()?,
                     )
                 },
                 ca: value.ca,
             },
         })
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("Nix daemon error {0}")]
+    NixError(#[from] nix_client::Error),
+    #[error("no such hash {0:?}")]
+    NoSuchHash(wire::StorePathHash),
+    #[error("during value conversion {0:}")]
+    TryFrom(String),
+}
+
+impl From<Error> for tonic::Status {
+    fn from(value: Error) -> Self {
+        match value {
+            Error::NixError(error) => tonic::Status::internal(error.to_string()),
+            Error::NoSuchHash(store_path_hash) => tonic::Status::not_found(format!(
+                "no such hash {}",
+                Into::<String>::into(store_path_hash)
+            )),
+            Error::TryFrom(error) => {
+                tonic::Status::internal(format!("{} during value conversion", error))
+            }
+        }
     }
 }
 
@@ -85,7 +108,7 @@ pub struct NarCopyService<RW> {
 
 impl NarCopyService<UnixStream> {
     pub async fn new_default_socket() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let nix_socket = NixClient::connect_unix_default().await.unwrap();
+        let nix_socket = NixClient::connect_unix_default().await?;
         let nix_client = NixClient::handshake(nix_socket).await?;
 
         Ok(Self {
@@ -107,31 +130,31 @@ where
     {
         let hash: wire::StorePathHash = request.into_inner().hash.try_into().expect("valid hash");
 
-        log::debug!("resolving hash {:?}", hash);
-
-        let path = self
+        if let Some(path) = self
             .nix_client
             .write()
             .await
             .query_path_from_hash_part(hash)
             .await
-            .unwrap()
-            .unwrap();
-
-        log::debug!("resolving path {}", path);
-
-        let info = self
-            .nix_client
-            .write()
-            .await
-            .query_path_info(&path)
-            .await
-            .unwrap()
-            .unwrap();
-
-        Ok(tonic::Response::new(nar_copy::DownloadNarInfoResponse {
-            nar_info: Some((ValidPathInfo { path, info }).into()),
-        }))
+            .map_err(Into::<Error>::into)?
+        {
+            if let Some(info) = self
+                .nix_client
+                .write()
+                .await
+                .query_path_info(&path)
+                .await
+                .map_err(Into::<Error>::into)?
+            {
+                Ok(tonic::Response::new(nar_copy::DownloadNarInfoResponse {
+                    nar_info: Some((ValidPathInfo { path, info }).into()),
+                }))
+            } else {
+                Err(Error::NoSuchHash(hash).into())
+            }
+        } else {
+            Err(Error::NoSuchHash(hash).into())
+        }
     }
 
     type DownloadNarStream = ReceiverStream<Result<nar_copy::DownloadNarResponse, tonic::Status>>;
@@ -143,45 +166,47 @@ where
         let hash: wire::StorePathHash = request.hash.try_into().expect("valid hash");
         let chunk_size: u64 = request.chunk_size;
 
-        let path = self
+        if let Some(path) = self
             .nix_client
             .write()
             .await
             .query_path_from_hash_part(hash)
             .await
-            .unwrap()
-            .unwrap();
+            .map_err(Into::<Error>::into)?
+        {
+            let nar = self
+                .nix_client
+                .write()
+                .await
+                .nar_from_path(&path)
+                .await
+                .map_err(Into::<Error>::into)?;
 
-        let nar = self
-            .nix_client
-            .write()
-            .await
-            .nar_from_path(&path)
-            .await
-            .unwrap();
+            let (tx, rx) = mpsc::channel(1);
 
-        let (tx, rx) = mpsc::channel(1);
+            self.job_set
+                .spawn(
+                    "download_nar",
+                    async move {
+                        for (ix, chunk) in nar.bytes.chunks(chunk_size as usize).enumerate() {
+                            tx.send(Ok(nar_copy::DownloadNarResponse {
+                                nar_chunk: Some(nar_copy::NarChunk {
+                                    offset: ix as u64 * chunk_size,
+                                    body: chunk.to_vec(),
+                                }),
+                            }))
+                            .await
+                            .expect("successful send over the mpsc");
+                        }
+                    },
+                    async {},
+                )
+                .await;
 
-        self.job_set
-            .spawn(
-                "download_nar",
-                async move {
-                    for (ix, chunk) in nar.bytes.chunks(chunk_size as usize).enumerate() {
-                        tx.send(Ok(nar_copy::DownloadNarResponse {
-                            nar_chunk: Some(nar_copy::NarChunk {
-                                offset: ix as u64 * chunk_size,
-                                body: chunk.to_vec(),
-                            }),
-                        }))
-                        .await
-                        .unwrap();
-                    }
-                },
-                async {},
-            )
-            .await;
-
-        Ok(tonic::Response::new(ReceiverStream::new(rx)))
+            Ok(tonic::Response::new(ReceiverStream::new(rx)))
+        } else {
+            Err(Error::NoSuchHash(hash).into())
+        }
     }
 
     async fn upload_nar(
@@ -194,7 +219,7 @@ where
             r#type: Some(nar_copy::upload_nar_request::Type::NarInfo(nar_info)),
         })) = request.message().await
         {
-            let nar_info: wire::ValidPathInfo = nar_info.try_into().unwrap();
+            let nar_info: wire::ValidPathInfo = nar_info.try_into().map_err(Error::TryFrom)?;
             let mut nar_buf: BytesMut = BytesMut::new();
             nar_buf.resize(nar_info.info.nar_size as usize, 0);
 
@@ -205,7 +230,7 @@ where
                         let start = nar_chunk.offset as usize;
                         let end = nar_chunk.offset as usize + nar_chunk.body.len();
                         let mut writer = nar_buf[start..end].writer();
-                        std::io::copy(&mut nar_chunk.body.as_slice(), &mut writer).unwrap();
+                        std::io::copy(&mut nar_chunk.body.as_slice(), &mut writer)?;
                     }
                     _ => todo!(),
                 }
@@ -218,7 +243,7 @@ where
                 .await
                 .add_to_store_nar(&nar_info, false, false, &nar)
                 .await
-                .unwrap();
+                .map_err(Into::<Error>::into)?;
 
             Ok(tonic::Response::new(nar_copy::UploadNarResponse {}))
         } else {

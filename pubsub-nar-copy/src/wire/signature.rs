@@ -12,7 +12,7 @@ pub struct Signature {
 
 impl From<&Signature> for String {
     fn from(value: &Signature) -> Self {
-        let mut signature = std::io::Cursor::new(Vec::new());
+        let signature = std::io::Cursor::new(Vec::new());
         let signature = base64::write::EncoderWriter::new(
             signature,
             &base64::engine::general_purpose::STANDARD,
@@ -26,7 +26,7 @@ impl From<&Signature> for String {
 }
 
 impl TryFrom<&str> for Signature {
-    type Error = ();
+    type Error = String;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         let mut value = value.split(':');
@@ -41,7 +41,8 @@ impl TryFrom<&str> for Signature {
                     );
                     let sig = BytesMut::new();
                     let mut writer = sig.writer();
-                    std::io::copy(&mut decoder, &mut writer).unwrap();
+                    std::io::copy(&mut decoder, &mut writer)
+                        .map_err(|_| "IO copy error".to_owned())?;
                     let sig = writer.into_inner();
 
                     return Ok(Self {
@@ -52,15 +53,15 @@ impl TryFrom<&str> for Signature {
             }
         }
 
-        return Err(());
+        return Err("signature didn't have exactly two ':' delimited segments".to_owned());
     }
 }
 
 impl TryFrom<String> for Signature {
-    type Error = ();
+    type Error = String;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        TryFrom::try_from(value.as_str())
+        Ok(TryFrom::try_from(value.as_str())?)
     }
 }
 
