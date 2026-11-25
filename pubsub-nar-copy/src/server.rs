@@ -128,20 +128,15 @@ where
         request: tonic::Request<nar_copy::DownloadNarInfoRequest>,
     ) -> std::result::Result<tonic::Response<nar_copy::DownloadNarInfoResponse>, tonic::Status>
     {
+        let mut nix_client = self.nix_client.write().await;
         let hash: wire::StorePathHash = request.into_inner().hash.try_into().expect("valid hash");
 
-        if let Some(path) = self
-            .nix_client
-            .write()
-            .await
+        if let Some(path) = nix_client
             .query_path_from_hash_part(hash)
             .await
             .map_err(Into::<Error>::into)?
         {
-            if let Some(info) = self
-                .nix_client
-                .write()
-                .await
+            if let Some(info) = nix_client
                 .query_path_info(&path)
                 .await
                 .map_err(Into::<Error>::into)?
@@ -162,22 +157,17 @@ where
         &self,
         request: tonic::Request<nar_copy::DownloadNarRequest>,
     ) -> std::result::Result<tonic::Response<Self::DownloadNarStream>, tonic::Status> {
+        let mut nix_client = self.nix_client.write().await;
         let request = request.into_inner();
         let hash: wire::StorePathHash = request.hash.try_into().expect("valid hash");
         let chunk_size: u64 = request.chunk_size;
 
-        if let Some(path) = self
-            .nix_client
-            .write()
-            .await
+        if let Some(path) = nix_client
             .query_path_from_hash_part(hash)
             .await
             .map_err(Into::<Error>::into)?
         {
-            let nar = self
-                .nix_client
-                .write()
-                .await
+            let nar = nix_client
                 .nar_from_path(&path)
                 .await
                 .map_err(Into::<Error>::into)?;
@@ -219,6 +209,7 @@ where
             r#type: Some(nar_copy::upload_nar_request::Type::NarInfo(nar_info)),
         })) = request.message().await
         {
+            let mut nix_client = self.nix_client.write().await;
             let nar_info: wire::ValidPathInfo = nar_info.try_into().map_err(Error::TryFrom)?;
             let mut nar_buf: BytesMut = BytesMut::new();
             nar_buf.resize(nar_info.info.nar_size as usize, 0);
@@ -238,9 +229,7 @@ where
 
             let nar: Vec<u8> = nar_buf.into();
             let nar: wire::Nar = nar.into();
-            self.nix_client
-                .write()
-                .await
+            nix_client
                 .add_to_store_nar(&nar_info, false, false, &nar)
                 .await
                 .map_err(Into::<Error>::into)?;
