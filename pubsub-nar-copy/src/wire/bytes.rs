@@ -1,26 +1,97 @@
-use std::marker::PhantomData;
+use std::{
+    marker::PhantomData,
+    num::{NonZeroU64, NonZeroUsize},
+};
 
 use bytes::{BufMut, Bytes, BytesMut};
-use nom::{IResult, Parser as _, number::Endianness};
+use nom::{IResult, Mode as _, Parser as _, error::ParseError as _, number::Endianness};
 
 use crate::wire::{NixDeserialize, NixSerialize, ProtocolVersion};
 
 pub struct Unpadded<A>(pub A);
 
-fn deserialize_vec_u8(
+pub struct WithBytes<F> {
+    parser: F,
+    padding: bool,
+}
+
+pub fn with_bytes<I, O, E: nom::error::ParseError<I>, F>(
+    parser: F,
+    padding: bool,
+) -> impl nom::Parser<I, Output = O, Error = E>
+where
+    F: nom::Parser<I, Error = E, Output = O>,
+    I: nom::Input<Item = u8>,
+{
+    WithBytes { parser, padding }
+}
+
+impl<I, F> nom::Parser<I> for WithBytes<F>
+where
+    I: nom::Input<Item = u8>,
+    F: nom::Parser<I>,
+    F::Error: nom::error::ParseError<I>,
+{
+    type Output = F::Output;
+    type Error = F::Error;
+
+    fn process<OM>(&mut self, input: I) -> nom::PResult<OM, I, Self::Output, Self::Error>
+    where
+        OM: nom::OutputMode,
+    {
+        let (i, mut size) = nom::number::u64(Endianness::Little).process::<nom::OutputM<
+            nom::Emit,
+            OM::Error,
+            OM::Incomplete,
+        >>(input)?;
+
+        let padding = if self.padding {
+            calculate_padding(size)
+        } else {
+            0
+        };
+        size += padding;
+
+        if let Some(needed) = (size as usize)
+            .checked_sub(i.input_len())
+            .and_then(NonZeroUsize::new)
+        {
+            Err(nom::Err::Incomplete(nom::Needed::Size(needed)))
+        } else {
+            let (rest, i) = i.take_split(size as usize - padding as usize);
+
+            let (input_inner, value) = self.parser.process::<OM>(i)?;
+            if input_inner.input_len() != 0 as usize {
+                return Err(nom::Err::Error(OM::Error::bind(|| {
+                    <F as nom::Parser<I>>::Error::from_error_kind(
+                        input_inner,
+                        nom::error::ErrorKind::SeparatedList,
+                    )
+                })));
+            } else {
+                Ok((rest.take_from(padding as usize), value))
+            }
+        }
+    }
+}
+
+fn deserialize_slice(
     _protocol_version: ProtocolVersion,
     input: &[u8],
     padding: bool,
-) -> IResult<&[u8], Vec<u8>> {
+) -> IResult<&[u8], &[u8]> {
     let (input, size) = nom::number::u64(Endianness::Little).parse(input)?;
     let padding = if padding { calculate_padding(size) } else { 0 };
 
-    let mut buf = Vec::with_capacity((size + padding) as usize);
-
     let (input, bytes) = nom::bytes::take(size + padding).parse(input)?;
-    buf.put_slice(&bytes[0..size as usize]);
 
-    Ok((input, buf))
+    Ok((input, &bytes[0..size as usize]))
+}
+
+impl<'a> NixDeserialize<'a> for &'a [u8] {
+    fn deserialize(protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        deserialize_slice(protocol_version, input, true)
+    }
 }
 
 impl<'a> NixDeserialize<'a> for BytesMut {
@@ -33,7 +104,8 @@ impl<'a> NixDeserialize<'a> for BytesMut {
 
 impl<'a> NixDeserialize<'a> for Vec<u8> {
     fn deserialize(protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
-        deserialize_vec_u8(protocol_version, input, true)
+        let (input, slice) = deserialize_slice(protocol_version, input, true)?;
+        Ok((input, slice.to_owned()))
     }
 }
 
@@ -55,9 +127,8 @@ impl<'a> NixDeserialize<'a> for Unpadded<BytesMut> {
 
 impl<'a> NixDeserialize<'a> for Unpadded<Vec<u8>> {
     fn deserialize(protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
-        let (input, vec) = deserialize_vec_u8(protocol_version, input, false)?;
-
-        Ok((input, Unpadded(vec)))
+        let (input, slice) = deserialize_slice(protocol_version, input, false)?;
+        Ok((input, Unpadded(slice.to_owned())))
     }
 }
 

@@ -1,8 +1,9 @@
 use std::fmt::{Display, Write};
 
 use bytes::{BufMut as _, BytesMut};
+use itertools::Itertools;
 use nix_base32::{from_nix_base32, to_nix_base32};
-use nom::{AsBytes, IResult, Parser as _, number::Endianness};
+use nom::{AsBytes, IResult, Parser as _};
 
 use crate::wire::{
     self, NixDeserialize, NixSerialize, ProtocolVersion, StorePathHash, protocol_version,
@@ -93,11 +94,77 @@ impl StorePath {
     }
 }
 
-impl<'a> NixDeserialize<'a> for StorePath {
-    fn deserialize(protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
-        let (input, string) = String::deserialize(protocol_version, input)?;
+fn parse_string<'a>(input: &'a [u8]) -> IResult<&'a [u8], String> {
+    nom::multi::fold(
+        0..,
+        nom::character::complete::anychar,
+        String::new,
+        |mut string, c| {
+            string.push(c);
+            string
+        },
+    )
+    .parse(input)
+}
 
-        Ok((input, string.as_str().try_into().expect("no error")))
+impl<'a> NixDeserialize<'a> for StorePath {
+    fn deserialize(_protocol_version: ProtocolVersion, input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        wire::bytes::with_bytes(
+            |input: &'a [u8]| {
+                let (store_dir, path) = if nom::character::anychar(input)?.1 == '/' {
+                    let (input, parts): (_, Vec<&'a [u8]>) = nom::multi::separated_list1(
+                        nom::character::complete::char('/'),
+                        nom::bytes::complete::take_till(|c| c == '/' as u8),
+                    )
+                    .parse(&input[1..])?;
+                    let _ = nom::combinator::eof(input)?;
+
+                    let (path, store_dir) = parts.split_last().unwrap();
+                    let store_dir: String = ["/"]
+                        .into_iter()
+                        .chain(
+                            store_dir
+                                .into_iter()
+                                .map(|b| unsafe { str::from_utf8_unchecked(b) })
+                                .intersperse("/"),
+                        )
+                        .collect();
+
+                    (Some(store_dir), *path)
+                } else {
+                    (None, input)
+                };
+
+                println!("got input {:?}", path);
+
+                let (input, (hash, name)) = nom::sequence::separated_pair(
+                    nom::bytes::complete::is_a("0123456789abcdfghijklmnpqrsvwxyz"),
+                    nom::character::char('-'),
+                    parse_string,
+                )
+                .parse(path)?;
+
+                println!("got hash {:?} and name {}", hash, name);
+
+                let hash: [u8; 20] = from_nix_base32(unsafe { str::from_utf8_unchecked(hash) })
+                    .expect("a valid base32 encoded hash")
+                    .try_into()
+                    .expect("a hash of length 160 bits (20 bytes)");
+
+                println!("got hash {:?} and name {} with {:?}", hash, name, input);
+
+                Ok((
+                    input,
+                    Self {
+                        store_dir: store_dir,
+                        hash: StorePathHash { hash },
+                        name,
+                    },
+                ))
+            },
+            true,
+        )
+        .parse(input)
     }
 }
 

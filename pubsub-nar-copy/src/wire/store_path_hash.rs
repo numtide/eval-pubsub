@@ -2,6 +2,7 @@ use std::array::TryFromSliceError;
 
 use bytes::BytesMut;
 use nix_base32::{from_nix_base32, to_nix_base32};
+use nom::Parser as _;
 
 use crate::wire::{self, NixDeserialize, NixSerialize};
 
@@ -67,13 +68,23 @@ impl TryFrom<Vec<u8>> for StorePathHash {
 
 impl<'a> NixDeserialize<'a> for StorePathHash {
     fn deserialize(
-        protocol_version: wire::ProtocolVersion,
+        _protocol_version: wire::ProtocolVersion,
         input: &'a [u8],
     ) -> nom::IResult<&'a [u8], Self> {
-        let (input, string) = String::deserialize(protocol_version, input)?;
-        let hash = Self::try_from(string).unwrap();
+        wire::bytes::with_bytes(
+            |input| {
+                let (input, hash) =
+                    nom::bytes::complete::is_a("0123456789abcdfghijklmnpqrsvwxyz").parse(input)?;
+                let hash: [u8; 20] = from_nix_base32(unsafe { str::from_utf8_unchecked(hash) })
+                    .expect("a valid base32 encoded hash")
+                    .try_into()
+                    .expect("a hash of length 160 bits (20 bytes)");
 
-        Ok((input, hash))
+                Ok((input, Self { hash }))
+            },
+            true,
+        )
+        .parse(input)
     }
 }
 
